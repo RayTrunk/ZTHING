@@ -31,3 +31,4 @@ workspace = true
 
 [build-dependencies]
 embed-manifest = "1.5.1"
+resvg = "0.50.0"

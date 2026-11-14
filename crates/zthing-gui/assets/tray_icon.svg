@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="tray-grad" x1="15%" y1="15%" x2="85%" y2="85%">
+      <stop offset="0%" stop-color="#FF6B35" />
+      <stop offset="45%" stop-color="#F7931E" />
+      <stop offset="100%" stop-color="#00D2FF" />
+    </linearGradient>
+  </defs>
+
+  <!-- Kräftiger Lupenring für kleine Pixelgrößen -->
+  <circle cx="224" cy="224" r="164" fill="none" stroke="url(#tray-grad)" stroke-width="44" />
+
+  <!-- Kräftiger Lupengriff -->
+  <line x1="344" y1="344" x2="452" y2="452" stroke="url(#tray-grad)" stroke-width="58" stroke-linecap="round" />
+
+  <!-- Kompaktes, gut lesbares Z -->
+  <path d="M 152 146 L 300 146 L 300 184 L 206 264 L 300 264 L 300 302 L 148 302 L 148 264 L 242 184 L 152 184 Z" 
+        fill="url(#tray-grad)" />
+</svg>

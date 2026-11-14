@@ -17,7 +17,11 @@ use zthing_gui::app::{self, App, Shared};
 use zthing_gui::config::{self, Theme};
 use zthing_gui::text::{self, Texts};
 
-const ICON_SIZE: u32 = 32;
+/// Rendered from `assets/` by build.rs, the sizes must match the ones there.
+const WINDOW_ICON_SIZE: u32 = 256;
+const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window_icon.rgba"));
+const TRAY_ICON_SIZE: u32 = 32;
+const TRAY_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon.rgba"));
 
 fn main() -> anyhow::Result<()> {
     let texts = text::system();
@@ -50,9 +54,9 @@ fn main() -> anyhow::Result<()> {
             .with_title("ZTHING")
             .with_inner_size([1100.0, 650.0])
             .with_icon(egui::IconData {
-                rgba: icon_rgba(),
-                width: ICON_SIZE,
-                height: ICON_SIZE,
+                rgba: WINDOW_ICON.to_vec(),
+                width: WINDOW_ICON_SIZE,
+                height: WINDOW_ICON_SIZE,
             }),
         ..Default::default()
     };
@@ -128,7 +132,11 @@ fn create_tray(
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .with_tooltip("ZTHING")
-        .with_icon(Icon::from_rgba(icon_rgba(), ICON_SIZE, ICON_SIZE)?)
+        .with_icon(Icon::from_rgba(
+            TRAY_ICON.to_vec(),
+            TRAY_ICON_SIZE,
+            TRAY_ICON_SIZE,
+        )?)
         .build()?;
 
     let quit_id = quit.id().clone();
@@ -154,22 +162,4 @@ fn create_tray(
         }
     }));
     Ok(tray)
-}
-
-/// A magnifying glass, drawn in code so the binary needs no image files.
-fn icon_rgba() -> Vec<u8> {
-    let mut rgba = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let distance = ((fx - 13.0).powi(2) + (fy - 13.0).powi(2)).sqrt();
-            let lens = (8.0..11.5).contains(&distance);
-            let handle = fx > 19.0 && fx < 30.0 && (fx - fy).abs() < 3.0;
-            if lens || handle {
-                let at = ((y * ICON_SIZE + x) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&[0x1E, 0x6F, 0xD9, 0xFF]);
-            }
-        }
-    }
-    rgba
 }
