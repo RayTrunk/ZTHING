@@ -118,6 +118,10 @@ fn bench(c: &mut Criterion) {
         b.iter(|| index.search(black_box(&narrower), Some(&previous), &cancel))
     });
     group.finish();
+    eprintln!(
+        "index heap after path searches {:.1} MiB",
+        index.heap_size() as f64 / f64::from(1 << 20)
+    );
 
     let mut group = c.benchmark_group("build");
     group.sample_size(10);

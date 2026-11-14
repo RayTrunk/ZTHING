@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
@@ -30,13 +33,23 @@ struct Entry {
 }
 
 /// All names share one buffer, so an entry costs no heap allocation of its own.
-/// Full paths are not stored and get rebuilt from the parent chain.
+/// File paths are not stored and get rebuilt from the parent chain.
 #[derive(Debug, Default)]
 pub struct Index {
     names: String,
     /// Case-folded copy with the same byte layout as `names`, so one offset addresses both.
     names_folded: String,
     entries: Vec<Entry>,
+    /// Built by the first `path:` search and dropped on every change to the entries.
+    folder_paths: OnceLock<FolderPaths>,
+}
+
+/// Case-folded full paths of all folders. A file's path is its parent's path
+/// plus its name, so `path:` searches skip walking the parent chain.
+#[derive(Debug, Default)]
+struct FolderPaths {
+    text: String,
+    spans: HashMap<u32, Range<usize>>,
 }
 
 impl Index {
@@ -71,6 +84,7 @@ impl Index {
         });
         self.names.push_str(name);
         fold_case_into(&mut self.names_folded, name);
+        self.folder_paths.take();
         Ok(self.entries.len() as u32 - 1)
     }
 
@@ -108,6 +122,9 @@ impl Index {
         self.names.capacity()
             + self.names_folded.capacity()
             + self.entries.capacity() * size_of::<Entry>()
+            + self.folder_paths.get().map_or(0, |paths| {
+                paths.text.capacity() + paths.spans.capacity() * size_of::<(u32, Range<usize>)>()
+            })
     }
 
     /// Returns matching ids in index order, or `None` once `cancel` is set.
@@ -173,7 +190,9 @@ impl Index {
             Kind::Text(finder) => finder
                 .find(self.haystack(id, term.path, !term.case, scratch))
                 .is_some(),
-            Kind::Regex(regex) => regex.is_match(self.haystack(id, term.path, false, scratch)),
+            // A case-insensitive regex matches folded text exactly like the original,
+            // and the folded text is what the folder path cache holds.
+            Kind::Regex(regex) => regex.is_match(self.haystack(id, term.path, !term.case, scratch)),
             Kind::Ext(exts) => self
                 .name_in(&self.names_folded, id)
                 .rsplit_once('.')
@@ -200,8 +219,34 @@ impl Index {
             return self.name_in(names, id).as_bytes();
         }
         scratch.clear();
+        if folded {
+            let paths = self.folder_paths();
+            if let Some(span) = paths.spans.get(&id) {
+                return paths.text[span.clone()].as_bytes();
+            }
+            if let Some(span) = paths.spans.get(&self.entries[id as usize].parent) {
+                scratch.push_str(&paths.text[span.clone()]);
+                scratch.push('\\');
+                scratch.push_str(self.name_in(names, id));
+                return scratch.as_bytes();
+            }
+        }
         self.write_path(id, names, scratch);
         scratch.as_bytes()
+    }
+
+    fn folder_paths(&self) -> &FolderPaths {
+        self.folder_paths.get_or_init(|| {
+            let mut paths = FolderPaths::default();
+            for id in 0..self.entries.len() as u32 {
+                if self.is_dir(id) {
+                    let start = paths.text.len();
+                    self.write_path(id, &self.names_folded, &mut paths.text);
+                    paths.spans.insert(id, start..paths.text.len());
+                }
+            }
+            paths
+        })
     }
 
     fn write_path(&self, id: u32, names: &str, out: &mut String) {

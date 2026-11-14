@@ -170,6 +170,26 @@ fn path_matches_against_the_full_path() {
 }
 
 #[test]
+fn path_search_respects_case_regex_and_later_entries() {
+    assert_eq!(
+        search(r"case:path:Projects\report\main"),
+        [r"C:\Projects\report\main.rs"]
+    );
+    assert!(search(r"case:path:projects\report\main").is_empty());
+    assert_eq!(search(r"path:regex:users\\anna$"), [r"C:\Users\anna"]);
+
+    let mut index = sample();
+    let cancel = AtomicBool::new(false);
+    let query = Query::parse(r"path:anna\new", NOW).unwrap();
+    assert_eq!(index.search(&query, None, &cancel), Some(vec![]));
+    let anna = 2;
+    let new = index
+        .push("New", Some(anna), ATTRIBUTE_DIRECTORY, 0, 0)
+        .unwrap();
+    assert_eq!(index.search(&query, None, &cancel), Some(vec![new]));
+}
+
+#[test]
 fn file_and_folder_restrict_the_type() {
     assert_eq!(search("folder:report"), [r"C:\Projects\report"]);
     assert_eq!(search("file:report").len(), 2);
