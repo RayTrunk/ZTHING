@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use zthing_core::{ATTRIBUTE_DIRECTORY, Index, Now, Query, QueryError};
+use zthing_core::{ATTRIBUTE_DIRECTORY, Index, Now, Query, QueryError, SortKey};
 
 const DAY: i64 = 86_400;
 /// 2026-03-15 12:00 UTC, 13:00 local time in CET.
@@ -276,4 +276,58 @@ fn cancelled_search_returns_none() {
     let index = sample();
     let query = Query::parse("report", NOW).unwrap();
     assert_eq!(index.search(&query, None, &AtomicBool::new(true)), None);
+}
+
+#[test]
+fn sort_orders_by_each_key() {
+    let index = sample();
+    let mut ids = index
+        .search(
+            &Query::parse("file:", NOW).unwrap(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let names = |ids: &[u32]| ids.iter().map(|&id| index.name(id)).collect::<Vec<_>>();
+
+    index.sort(&mut ids, SortKey::Name);
+    assert_eq!(
+        names(&ids),
+        [
+            "budget.xlsx",
+            "main.rs",
+            "Report 2026.PDF",
+            "report-draft.docx",
+            "zebra.png",
+            "Ärger.txt",
+            "İstanbul.jpg",
+        ]
+    );
+    index.sort(&mut ids, SortKey::Size);
+    assert_eq!(names(&ids)[..2], ["Ärger.txt", "main.rs"]);
+    index.sort(&mut ids, SortKey::Modified);
+    assert_eq!(names(&ids).last(), Some(&"Report 2026.PDF"));
+    index.sort(&mut ids, SortKey::Path);
+    assert_eq!(names(&ids)[0], "main.rs");
+}
+
+#[test]
+fn parents_can_be_set_after_children() {
+    let mut index = Index::new();
+    let file = index.push("file.txt", None, 0, 0, 0).unwrap();
+    let root = index.push("D:", None, ATTRIBUTE_DIRECTORY, 0, 0).unwrap();
+    index.set_parent(file, Some(root));
+    assert_eq!(index.path(file), r"D:\file.txt");
+}
+
+#[test]
+fn removed_entries_disappear_from_searches() {
+    let mut index = sample();
+    let cancel = AtomicBool::new(false);
+    let query = Query::parse(r#"path:"my docs""#, NOW).unwrap();
+    let hits = index.search(&query, None, &cancel).unwrap();
+    assert_eq!(hits.len(), 2);
+    index.remove(hits[0]);
+    assert!(index.is_removed(hits[0]));
+    assert_eq!(index.search(&query, None, &cancel), Some(vec![hits[1]]));
 }

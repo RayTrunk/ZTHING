@@ -11,10 +11,21 @@ use crate::query::{Kind, Only, Query, Term};
 pub const ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 const NO_PARENT: u32 = u32::MAX;
+/// Parent value of a removed entry. Ids stay stable, so parent links and the
+/// record maps of the volume readers remain valid.
+const REMOVED: u32 = u32::MAX - 1;
 
 /// Entries per parallel work unit. Cancellation is checked once per chunk,
 /// so this also bounds how long a superseded search keeps running.
 const CHUNK: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Name,
+    Path,
+    Size,
+    Modified,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -68,7 +79,7 @@ impl Index {
         modified: i64,
     ) -> Result<u32, IndexError> {
         let name_end = self.names.len() + name.len();
-        if self.entries.len() >= NO_PARENT as usize || name_end > u32::MAX as usize {
+        if self.entries.len() >= REMOVED as usize || name_end > u32::MAX as usize {
             return Err(IndexError::Full {
                 entries: self.entries.len(),
                 name_bytes: name_end,
@@ -86,6 +97,52 @@ impl Index {
         fold_case_into(&mut self.names_folded, name);
         self.folder_paths.take();
         Ok(self.entries.len() as u32 - 1)
+    }
+
+    pub fn set_parent(&mut self, id: u32, parent: Option<u32>) {
+        self.entries[id as usize].parent = parent.unwrap_or(NO_PARENT);
+        self.folder_paths.take();
+    }
+
+    /// Hides the entry from searches. Its name stays in the buffers.
+    pub fn remove(&mut self, id: u32) {
+        self.entries[id as usize].parent = REMOVED;
+        self.folder_paths.take();
+    }
+
+    pub fn is_removed(&self, id: u32) -> bool {
+        self.entries[id as usize].parent == REMOVED
+    }
+
+    pub fn set_attributes(&mut self, id: u32, attributes: u32) {
+        self.entries[id as usize].attributes = attributes;
+        self.folder_paths.take();
+    }
+
+    pub fn set_size(&mut self, id: u32, size: u64) {
+        self.entries[id as usize].size = size;
+    }
+
+    /// `modified` is in Unix seconds (UTC).
+    pub fn set_modified(&mut self, id: u32, modified: i64) {
+        self.entries[id as usize].modified = modified;
+    }
+
+    /// Sorts ascending. Name and path order ignores case.
+    pub fn sort(&self, ids: &mut [u32], key: SortKey) {
+        match key {
+            SortKey::Name => ids.par_sort_by(|&a, &b| {
+                self.name_in(&self.names_folded, a)
+                    .cmp(self.name_in(&self.names_folded, b))
+            }),
+            SortKey::Path => ids.par_sort_by_cached_key(|&id| {
+                let mut path = String::new();
+                self.write_path(id, &self.names_folded, &mut path);
+                path
+            }),
+            SortKey::Size => ids.par_sort_by_key(|&id| self.entries[id as usize].size),
+            SortKey::Modified => ids.par_sort_by_key(|&id| self.entries[id as usize].modified),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -116,6 +173,13 @@ impl Index {
 
     pub fn modified(&self, id: u32) -> i64 {
         self.entries[id as usize].modified
+    }
+
+    /// Releases the spare capacity that growing the buffers left behind.
+    pub fn shrink_to_fit(&mut self) {
+        self.names.shrink_to_fit();
+        self.names_folded.shrink_to_fit();
+        self.entries.shrink_to_fit();
     }
 
     pub fn heap_size(&self) -> usize {
@@ -149,7 +213,7 @@ impl Index {
             }
             let mut scratch = String::new();
             Some(
-                ids.filter(|&id| self.matches(id, &groups, &mut scratch))
+                ids.filter(|&id| !self.is_removed(id) && self.matches(id, &groups, &mut scratch))
                     .collect::<Vec<_>>(),
             )
         };
@@ -239,7 +303,7 @@ impl Index {
         self.folder_paths.get_or_init(|| {
             let mut paths = FolderPaths::default();
             for id in 0..self.entries.len() as u32 {
-                if self.is_dir(id) {
+                if self.is_dir(id) && !self.is_removed(id) {
                     let start = paths.text.len();
                     self.write_path(id, &self.names_folded, &mut paths.text);
                     paths.spans.insert(id, start..paths.text.len());
@@ -251,7 +315,7 @@ impl Index {
 
     fn write_path(&self, id: u32, names: &str, out: &mut String) {
         let parent = self.entries[id as usize].parent;
-        if parent != NO_PARENT {
+        if parent != NO_PARENT && parent != REMOVED {
             self.write_path(parent, names, out);
             out.push('\\');
         }
