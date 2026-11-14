@@ -97,7 +97,7 @@ One flat object for every command. Fields a command does not produce are absent.
 | `millis` | `search` | time the service spent on this request |
 | `results` | `search` | the page, each hit with the requested fields |
 | `status` | `status` | see below |
-| `version`, `protocol` | `version` | service version such as `"0.1.0"` and protocol version |
+| `version`, `protocol` | `version` | service version such as `"0.88.0"` and protocol version |
 
 A hit holds the requested fields: `name`, `path` (full path including the name),
 `size` (bytes, 0 for folders), `modified` (Unix seconds, UTC) and `folder` (bool).

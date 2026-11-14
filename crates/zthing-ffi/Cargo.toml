@@ -11,7 +11,7 @@ name = "zthing"
 crate-type = ["cdylib"]
 
 [dependencies]
-zthing-client = { version = "0.1.0", path = "../zthing-client" }
+zthing-client = { version = "0.88.0", path = "../zthing-client" }
 
 [lints]
 workspace = true

@@ -2,3 +2,4 @@
 /examples/csharp/bin
 /examples/csharp/obj
 __pycache__/
+/dist

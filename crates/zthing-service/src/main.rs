@@ -35,6 +35,9 @@ const USAGE: &str = "usage: zthing-service install | uninstall | run";
 const UPDATE_INTERVAL: Duration = Duration::from_millis(250);
 /// How often the indexer thread asks [`Indexer::needs_save`].
 const SAVE_CHECK_INTERVAL: Duration = Duration::from_secs(300);
+/// How long `uninstall` waits for the service to stop, so an uninstaller can
+/// delete the executable right after.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SETTINGS: &str =
     "# ZTHING service settings. Changes take effect when the service restarts.
 
@@ -372,6 +375,8 @@ impl server::Access for ClientAccess<'_> {
     }
 }
 
+/// Registers and starts the service, or updates and restarts an existing
+/// registration, so an installer can run it for upgrades as well.
 fn install() -> Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -389,10 +394,18 @@ fn install() -> Result<()> {
         account_name: None,
         account_password: None,
     };
-    let service =
-        manager.create_service(&info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)?;
+    let access = ServiceAccess::START | ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_STATUS;
+    let service = match manager.open_service(SERVICE_NAME, access) {
+        Ok(service) => {
+            service.change_config(&info)?;
+            service
+        }
+        Err(_) => manager.create_service(&info, access)?,
+    };
     service.set_description("Keeps the ZTHING file name index current and answers searches.")?;
-    service.start::<&str>(&[])?;
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        service.start::<&str>(&[])?;
+    }
     println!("installed and started the {SERVICE_NAME} service");
     Ok(())
 }
@@ -405,6 +418,13 @@ fn uninstall() -> Result<()> {
     )?;
     if service.query_status()?.current_state != ServiceState::Stopped {
         service.stop()?;
+    }
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while service.query_status()?.current_state != ServiceState::Stopped {
+        if Instant::now() > deadline {
+            bail!("the {SERVICE_NAME} service did not stop within {STOP_TIMEOUT:?}");
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     service.delete()?;
     println!("removed the {SERVICE_NAME} service");

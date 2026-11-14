@@ -1,0 +1,27 @@
+# Checks every push and pull request the way the milestones require:
+# formatting, clippy without warnings, all tests, and the examples.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Python package compiles
+        run: python -m py_compile python/zthing/__init__.py examples/python/search.py
+      - name: C# example builds
+        run: |
+          cargo build --release -p zthing-ffi
+          dotnet build examples/csharp

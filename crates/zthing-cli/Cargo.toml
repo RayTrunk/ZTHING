@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 serde_json = "1.0.154"
-zthing-client = { version = "0.1.0", path = "../zthing-client" }
+zthing-client = { version = "0.88.0", path = "../zthing-client" }
 
 [lints]
 workspace = true

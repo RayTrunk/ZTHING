@@ -31,6 +31,7 @@ use crate::theme;
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 /// Rows per request. The table asks for a page once one of its rows becomes visible.
 const PAGE: u64 = 200;
+const COPYRIGHT: &str = "(C) 2026 R.Trunk";
 /// `CREATE_NEW_CONSOLE`: a console program started from the window gets a window of its own.
 const CREATE_NEW_CONSOLE: u32 = 0x10;
 
@@ -576,6 +577,7 @@ impl App {
                         ui.heading("ZTHING");
                         ui.label(format!("{} {}", texts.version, env!("CARGO_PKG_VERSION")));
                         ui.label(texts.about);
+                        ui.weak(COPYRIGHT);
                     });
                 });
                 ui.separator();
@@ -587,7 +589,7 @@ impl App {
                         ui.label(service);
                         ui.end_row();
                         ui.label(texts.license);
-                        ui.label("MIT OR Apache-2.0");
+                        ui.label(texts.license_text);
                         ui.end_row();
                         ui.label(texts.settings);
                         ui.horizontal(|ui| {

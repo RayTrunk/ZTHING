@@ -1,0 +1,45 @@
+# Builds the release for a tag such as v0.88.0: the ZIP and the installer,
+# signed when the repository has a code signing certificate.
+#
+# Signing secrets (optional):
+#   SIGN_PFX_BASE64   the .pfx certificate, base64 encoded
+#   SIGN_PFX_PASSWORD its password
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # On job level, so the Certificate step can test for it.
+    env:
+      SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+      - name: Certificate
+        if: env.SIGN_PFX_BASE64 != ''
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'zthing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          "ZTHING_SIGN_PFX=$pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Package
+        env:
+          ZTHING_SIGN_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: powershell -ExecutionPolicy Bypass -File installer\package.ps1
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*-setup.exe

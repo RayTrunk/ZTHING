@@ -1,5 +1,7 @@
 """Search file names through the ZTHING service on Windows.
 
+(C) 2026 R.Trunk, licensed under the GNU General Public License version 3.
+
 Talks JSON Lines to the service pipe ``\\\\.\\pipe\\zthing`` directly, so it needs
 neither zthing.dll nor anything beyond the standard library. docs/API.md in the
 ZTHING repository describes the protocol.

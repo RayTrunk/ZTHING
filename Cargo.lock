@@ -1171,12 +1171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embed-manifest"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba92c8f4591bf29f89716b45e5f5f56577adbb81426e5620c6e994da7c88bb7a"
-
-[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5629,7 +5623,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zthing-cli"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -5638,7 +5632,7 @@ dependencies = [
 
 [[package]]
 name = "zthing-client"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5647,7 +5641,7 @@ dependencies = [
 
 [[package]]
 name = "zthing-core"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "criterion",
  "memchr",
@@ -5658,20 +5652,19 @@ dependencies = [
 
 [[package]]
 name = "zthing-ffi"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "zthing-client",
 ]
 
 [[package]]
 name = "zthing-gui"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "anyhow",
  "chrono",
  "eframe",
  "egui_extras",
- "embed-manifest",
  "global-hotkey",
  "resvg",
  "serde",
@@ -5687,7 +5680,7 @@ dependencies = [
 
 [[package]]
 name = "zthing-ntfs"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "thiserror 2.0.21",
  "walkdir",
@@ -5697,7 +5690,7 @@ dependencies = [
 
 [[package]]
 name = "zthing-service"
-version = "0.1.0"
+version = "0.88.0"
 dependencies = [
  "anyhow",
  "chrono",
