@@ -1,0 +1,23 @@
+[package]
+name = "zthing-core"
+description = "Index, search and query parser for ZTHING"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memchr = "2.8.3"
+rayon = "1.12.0"
+regex = "1.13.1"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+criterion = "0.7.0"
+
+[[bench]]
+name = "search"
+harness = false
+
+[lints]
+workspace = true
