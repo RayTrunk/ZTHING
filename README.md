@@ -8,13 +8,13 @@ millions of files while you type.
 
 ![ZTHING search window with results and image preview](docs/screenshots/main-quill-dark.png)
 
-- Results while typing: a search over 3.8 million entries takes 3 to 31 ms.
-- Always current: new, renamed and deleted files show up within about a second.
-- One index for everything: the search window, the command line `zt`, a DLL for
-  C, C++ and C#, a Python package, an optional HTTP API and the URL protocol
-  `zthing:` all ask the same Windows service.
-- Users only see what they may open: the service hides hits in folders the
-  asking user cannot list.
+- A search over 3.8 million entries takes 3 to 31 ms, so the list keeps up
+  with every key you press.
+- New, renamed and deleted files show up within about a second.
+- The search window, the command line `zt`, a DLL for C, C++ and C#, a Python
+  package, an optional HTTP API and the URL protocol `zthing:` all query the
+  same Windows service and its one index.
+- The service hides hits in folders the asking user cannot list.
 
 ## Install
 
@@ -43,8 +43,9 @@ contain all three.
 | F3 | show or hide the preview |
 | right click | open with, terminal here, copy name, properties |
 
-The preview pane shows text files, and for other files the picture Explorer
-shows: thumbnails of images, videos and documents, otherwise the icon. Cloud
+For text files the preview pane shows the content. For everything else it
+shows the picture Explorer would: a thumbnail of an image, video or document,
+otherwise the icon. Cloud
 placeholders such as OneDrive files on demand are never downloaded for a preview.
 
 The gear button opens the settings: colour theme (the Quill themes and others),
