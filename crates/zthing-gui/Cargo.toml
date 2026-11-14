@@ -9,8 +9,6 @@ rust-version.workspace = true
 [[bin]]
 name = "zthing-gui"
 path = "src/main.rs"
-# The embedded administrator manifest would keep a test binary from starting.
-test = false
 
 [dependencies]
 anyhow = "1.0.104"
@@ -23,8 +21,7 @@ sys-locale = "0.3.2"
 toml = "1.2.1"
 tray-icon = "0.24.2"
 winsafe = { version = "0.0.24", features = ["user"] }
-zthing-core = { version = "0.1.0", path = "../zthing-core" }
-zthing-ntfs = { version = "0.1.0", path = "../zthing-ntfs" }
+zthing-client = { version = "0.1.0", path = "../zthing-client" }
 
 [lints]
 workspace = true

@@ -5642,8 +5642,7 @@ dependencies = [
  "toml 1.2.1+spec-1.1.0",
  "tray-icon",
  "winsafe",
- "zthing-core",
- "zthing-ntfs",
+ "zthing-client",
 ]
 
 [[package]]

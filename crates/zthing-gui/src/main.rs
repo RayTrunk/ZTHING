@@ -2,9 +2,9 @@
 #![windows_subsystem = "windows"]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow};
 use eframe::egui;
@@ -26,27 +26,28 @@ const TRAY_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon.rgb
 fn main() -> anyhow::Result<()> {
     let texts = text::system();
     let app_data = std::env::var_os("APPDATA").context("APPDATA is not set")?;
-    let local_app_data = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
     let (config, config_problem) =
         config::load(&PathBuf::from(app_data).join(r"ZTHING\config.toml"));
-    let index_path = PathBuf::from(local_app_data).join(r"ZTHING\index.bin");
-    let drives: Vec<char> = if config.drives.is_empty() {
-        zthing_ntfs::fixed_drives()
-    } else {
-        config
-            .drives
-            .iter()
-            .filter_map(|drive| drive.chars().next())
-            .map(|drive| drive.to_ascii_uppercase())
-            .collect()
-    };
-    // The trailing backslash hides the folder's contents but not folders that
-    // merely start with the same name.
+    // The service indexes every drive, so the chosen drives and excluded
+    // folders become terms in front of each query. The trailing backslash
+    // hides a folder's contents but not folders that merely start with the same name.
+    let drives = config
+        .drives
+        .iter()
+        .filter_map(|drive| drive.chars().next())
+        .map(|drive| format!("path:\"{}:\\\"", drive.to_ascii_uppercase()))
+        .collect::<Vec<_>>()
+        .join("|");
     let exclusions: String = config
         .exclude
         .iter()
         .map(|folder| format!("!path:\"{}\\\" ", folder.trim_end_matches('\\')))
         .collect();
+    let prefix = if drives.is_empty() {
+        exclusions
+    } else {
+        format!("{drives} {exclusions}")
+    };
     let shared = Arc::new(Shared::new(config_problem.into_iter().collect()));
 
     let options = eframe::NativeOptions {
@@ -70,24 +71,9 @@ fn main() -> anyhow::Result<()> {
                 Theme::Light => egui::ThemePreference::Light,
                 Theme::Dark => egui::ThemePreference::Dark,
             });
-            app::spawn_indexer(
-                shared.clone(),
-                ctx.clone(),
-                index_path.clone(),
-                drives,
-                texts,
-            );
-            let (requests, received) = mpsc::channel();
-            let cancel = Arc::new(AtomicBool::new(false));
-            let results = Arc::new(Mutex::new(None));
-            app::spawn_searcher(
-                shared.clone(),
-                ctx.clone(),
-                received,
-                cancel.clone(),
-                results.clone(),
-                exclusions,
-            );
+            let (jobs, received_jobs) = mpsc::channel();
+            let (replies, received_replies) = mpsc::channel();
+            app::spawn_client(shared.clone(), ctx.clone(), received_jobs, replies);
             let hotkeys = register_hotkey(&config.hotkey, &shared, &ctx)
                 .map_err(|e| shared.note(format!("{} {}: {e}", texts.hotkey_failed, config.hotkey)))
                 .ok();
@@ -95,7 +81,13 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| shared.note(format!("Tray: {e}")))
                 .ok();
             Ok(Box::new(App::new(
-                shared, texts, index_path, requests, cancel, results, tray, hotkeys,
+                shared,
+                texts,
+                prefix,
+                jobs,
+                received_replies,
+                tray,
+                hotkeys,
             )))
         }),
     )

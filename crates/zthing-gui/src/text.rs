@@ -12,8 +12,7 @@ pub struct Texts {
     pub show: &'static str,
     pub quit: &'static str,
     pub indexing: &'static str,
-    pub updating: &'static str,
-    pub skipped: &'static str,
+    pub no_service: &'static str,
     pub hotkey_failed: &'static str,
 }
 
@@ -30,8 +29,7 @@ const GERMAN: Texts = Texts {
     show: "Anzeigen",
     quit: "Beenden",
     indexing: "Laufwerke werden eingelesen …",
-    updating: "Index wird aktualisiert …",
-    skipped: "Übersprungen",
+    no_service: "ZTHING-Dienst nicht erreichbar",
     hotkey_failed: "Tastenkürzel nicht verfügbar",
 };
 
@@ -48,8 +46,7 @@ const ENGLISH: Texts = Texts {
     show: "Show",
     quit: "Quit",
     indexing: "Reading drives …",
-    updating: "Updating the index …",
-    skipped: "Skipped",
+    no_service: "ZTHING service unreachable",
     hotkey_failed: "Shortcut unavailable",
 };
 

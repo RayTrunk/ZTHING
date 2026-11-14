@@ -13,10 +13,8 @@ const WINDOW_ICON_SIZE: u32 = 256;
 const TRAY_ICON_SIZE: u32 = 32;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Reading the $MFT needs administrator rights until the service of milestone 5 indexes.
-    embed_manifest(
-        new_manifest("ZTHING").requested_execution_level(ExecutionLevel::RequireAdministrator),
-    )?;
+    // The service reads the drives, so the window runs with the user's rights.
+    embed_manifest(new_manifest("ZTHING").requested_execution_level(ExecutionLevel::AsInvoker))?;
 
     // Rendered here, so the program needs no SVG renderer at run time.
     let out = std::env::var("OUT_DIR")?;

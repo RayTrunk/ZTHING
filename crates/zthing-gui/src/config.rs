@@ -7,7 +7,7 @@ use serde::Deserialize;
 /// Written on first start, so the user finds every setting with an explanation.
 pub const DEFAULT_FILE: &str = r#"# ZTHING settings. Changes take effect at the next start.
 
-# Drive letters to index, e.g. ["C", "D"]. Empty: all local NTFS drives.
+# Drive letters to search, e.g. ["C", "D"]. Empty: every drive the service indexes.
 drives = []
 
 # Folders whose contents are hidden from results, e.g. ['C:\Windows\WinSxS']

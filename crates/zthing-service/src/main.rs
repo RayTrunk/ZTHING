@@ -280,16 +280,7 @@ fn spawn_indexer(shared: Arc<Shared>, path: PathBuf) -> thread::JoinHandle<()> {
 }
 
 fn serve_client(connection: &pipe::Connection, shared: &Shared, filter: bool) {
-    let cache = if filter {
-        // Without the client's identity the filter cannot work, so the connection ends.
-        let Ok(sid) = connection.client_sid() else {
-            return;
-        };
-        let mut caches = shared.caches.lock().unwrap_or_else(PoisonError::into_inner);
-        caches.entry(sid).or_default().clone()
-    } else {
-        Arc::default()
-    };
+    let mut cache: Option<Arc<Mutex<server::AccessCache>>> = None;
     let mut reader = BufReader::new(connection);
     let mut writer = connection;
     let access = ClientAccess(connection);
@@ -301,6 +292,20 @@ fn serve_client(connection: &pipe::Connection, shared: &Shared, filter: bool) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
+        // Looked up after the first read, because Windows refuses to impersonate
+        // a pipe client before data came through. Without the client's identity
+        // the filter cannot work, so the connection ends.
+        let cache = match &cache {
+            Some(cache) => cache.clone(),
+            None if filter => {
+                let Ok(sid) = connection.client_sid() else {
+                    return;
+                };
+                let mut caches = shared.caches.lock().unwrap_or_else(PoisonError::into_inner);
+                cache.insert(caches.entry(sid).or_default().clone()).clone()
+            }
+            None => cache.insert(Arc::default()).clone(),
+        };
         let guard = shared
             .indexer
             .read()

@@ -1,5 +1,4 @@
-//! Window, settings and texts of the ZTHING GUI. A library so that its tests
-//! run without the administrator manifest of the binary.
+//! Window, settings and texts of the ZTHING GUI, a client of the ZTHING service.
 
 pub mod app;
 pub mod config;
