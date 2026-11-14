@@ -4,7 +4,9 @@ Schnelle Dateinamensuche für Windows. ZTHING liest die NTFS-Masterdateitabelle
 direkt, hält den Index über das USN-Journal aktuell und findet Namen unter
 Millionen Dateien, während du tippst.
 
-[English](README.md)
+[English](README.md) · [Projektseite](https://raytrunk.github.io/ZTHING/)
+
+![ZTHING-Suchfenster mit Treffern und Bildvorschau](docs/screenshots/main-quill-dark.png)
 
 - Ergebnisse beim Tippen: Eine Suche über 3,8 Millionen Einträge dauert 5 bis 30 ms.
 - Immer aktuell: Neue, umbenannte und gelöschte Dateien erscheinen nach etwa einer Sekunde.
@@ -51,6 +53,11 @@ Vorschau, Tastenkürzel, zu durchsuchende Laufwerke, ausgeschlossene Ordner und
 die HTTP-API. Sie liegen in `%APPDATA%\ZTHING\config.toml`. Schließen des
 Fensters lässt ZTHING im Infobereich weiterlaufen, *Beenden* im Tray-Menü
 beendet es.
+
+| | |
+|---|---|
+| ![Code-Vorschau, Theme Nord](docs/screenshots/code-preview-nord.png) | ![Bildvorschau, Theme Quill Light](docs/screenshots/quill-light.png) |
+| ![Einstellungen](docs/screenshots/settings.png) | ![Info](docs/screenshots/about.png) |
 
 ## Suchsyntax
 

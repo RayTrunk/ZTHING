@@ -4,7 +4,9 @@ Fast file name search for Windows. ZTHING reads the NTFS master file table
 directly, keeps the index current through the USN journal and finds names among
 millions of files while you type.
 
-[Deutsch](README.de.md)
+[Deutsch](README.de.md) · [Project page](https://raytrunk.github.io/ZTHING/)
+
+![ZTHING search window with results and image preview](docs/screenshots/main-quill-dark.png)
 
 - Results while typing: a search over 3.8 million entries takes 5 to 30 ms.
 - Always current: new, renamed and deleted files show up within about a second.
@@ -49,6 +51,11 @@ The gear button opens the settings: colour theme (the Quill themes and others),
 preview, shortcut, drives to search, excluded folders and the HTTP API. They are
 stored in `%APPDATA%\ZTHING\config.toml`. Closing the window keeps ZTHING in the
 tray; *Quit* in the tray menu ends it.
+
+| | |
+|---|---|
+| ![Code preview, Nord theme](docs/screenshots/code-preview-nord.png) | ![Image preview, Quill Light theme](docs/screenshots/quill-light.png) |
+| ![Settings](docs/screenshots/settings.png) | ![About](docs/screenshots/about.png) |
 
 ## Query syntax
 

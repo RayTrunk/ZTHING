@@ -7,6 +7,8 @@ version = "0.88.0"
 edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.88"
+repository = "https://github.com/RayTrunk/ZTHING"
+homepage = "https://raytrunk.github.io/ZTHING/"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

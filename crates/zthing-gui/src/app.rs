@@ -818,9 +818,11 @@ impl eframe::App for App {
                 .resizable(true)
                 .sense(Sense::click())
                 .column(Column::initial(260.0).at_least(80.0).clip(true))
-                .column(Column::initial(440.0).at_least(80.0).clip(true))
-                .column(Column::initial(90.0).at_least(50.0))
-                .column(Column::remainder().at_least(120.0));
+                .column(Column::initial(85.0).at_least(50.0))
+                .column(Column::initial(130.0).at_least(110.0))
+                // The path comes last and takes what is left, so name, size and
+                // date stay in view also with the preview pane open.
+                .column(Column::remainder().at_least(80.0).clip(true));
             if std::mem::take(&mut self.scroll_to_selected)
                 && let Some(row) = self.selected
             {
@@ -833,9 +835,9 @@ impl eframe::App for App {
                 .header(row_height, |mut header| {
                     for (key, label) in [
                         (Sort::Name, texts.name),
-                        (Sort::Path, texts.folder),
                         (Sort::Size, texts.size),
                         (Sort::Modified, texts.modified),
+                        (Sort::Path, texts.folder),
                     ] {
                         header.col(|ui| {
                             let arrow = match (sort == key, descending) {
@@ -873,15 +875,15 @@ impl eframe::App for App {
                             ui.label(&name);
                         });
                         row.col(|ui| {
-                            ui.label(folder);
-                        });
-                        row.col(|ui| {
                             if !is_folder {
                                 ui.label(format_size(hit.size.unwrap_or(0)));
                             }
                         });
                         row.col(|ui| {
                             ui.label(format_date(hit.modified.unwrap_or(0)));
+                        });
+                        row.col(|ui| {
+                            ui.label(folder);
                         });
                         let response = row.response();
                         if response.clicked() || response.secondary_clicked() {
