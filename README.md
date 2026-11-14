@@ -8,7 +8,7 @@ millions of files while you type.
 
 ![ZTHING search window with results and image preview](docs/screenshots/main-quill-dark.png)
 
-- Results while typing: a search over 3.8 million entries takes 5 to 30 ms.
+- Results while typing: a search over 3.8 million entries takes 3 to 31 ms.
 - Always current: new, renamed and deleted files show up within about a second.
 - One index for everything: the search window, the command line `zt`, a DLL for
   C, C++ and C#, a Python package, an optional HTTP API and the URL protocol

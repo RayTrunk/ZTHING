@@ -8,7 +8,7 @@ Millionen Dateien, während du tippst.
 
 ![ZTHING-Suchfenster mit Treffern und Bildvorschau](docs/screenshots/main-quill-dark.png)
 
-- Ergebnisse beim Tippen: Eine Suche über 3,8 Millionen Einträge dauert 5 bis 30 ms.
+- Ergebnisse beim Tippen: Eine Suche über 3,8 Millionen Einträge dauert 3 bis 31 ms.
 - Immer aktuell: Neue, umbenannte und gelöschte Dateien erscheinen nach etwa einer Sekunde.
 - Ein Index für alles: Suchfenster, Kommandozeile `zt`, eine DLL für C, C++ und
   C#, ein Python-Paket, eine optionale HTTP-API und das URL-Protokoll `zthing:`
@@ -24,7 +24,7 @@ einmalig Administratorrechte nötig) sowie das URL-Protokoll `zthing:`. Wahlweis
 richtet er den Autostart ein und nimmt `zt` in den PATH auf. Beim ersten Start
 liest der Dienst alle lokalen NTFS-Laufwerke ein, das dauert einige Sekunden.
 
-Das ZIP enthält dieselben Dateien für eine Einrichtung von Hand: einmal
+Für eine Einrichtung von Hand enthält das ZIP dieselben Dateien: einmal
 `zthing-service.exe install` in einer Administrator-Konsole ausführen, danach
 `zthing-gui.exe` starten. `zthing-service.exe uninstall` entfernt den Dienst wieder.
 
@@ -43,16 +43,16 @@ also Namen, die alle drei enthalten.
 | F3 | Vorschau ein- oder ausblenden |
 | Rechtsklick | Öffnen mit, Terminal hier, Name kopieren, Eigenschaften |
 
-Die Vorschau zeigt Textdateien, bei anderen Dateien das Bild, das auch der
-Explorer zeigt: Vorschaubilder von Bildern, Videos und Dokumenten, sonst das
+Bei Textdateien zeigt die Vorschau den Inhalt, bei allen anderen das Bild aus
+dem Explorer: Vorschaubilder von Bildern, Videos und Dokumenten, sonst das
 Symbol. Cloud-Platzhalter wie OneDrive-Dateien auf Abruf werden für die Vorschau
 nie heruntergeladen.
 
 Das Zahnrad öffnet die Einstellungen: Farbschema (die Quill-Themes und weitere),
 Vorschau, Tastenkürzel, zu durchsuchende Laufwerke, ausgeschlossene Ordner und
-die HTTP-API. Sie liegen in `%APPDATA%\ZTHING\config.toml`. Schließen des
-Fensters lässt ZTHING im Infobereich weiterlaufen, *Beenden* im Tray-Menü
-beendet es.
+die HTTP-API. Sie liegen in `%APPDATA%\ZTHING\config.toml`. Nach dem
+Schließen des Fensters läuft ZTHING im Infobereich weiter; erst *Beenden* im
+Tray-Menü beendet es.
 
 | | |
 |---|---|
@@ -83,7 +83,7 @@ zt [--json] [--count] [--limit N] [--sort name|path|size|dm] <suche>
 ```
 
 `zt "*.iso"` gibt einen Pfad pro Zeile aus, `--json` Treffer mit Größe und Datum.
-Der Exit-Code ist 0 mit Treffern, 1 ohne und 2 bei Fehlern.
+Mit Treffern endet `zt` mit Exit-Code 0, ohne Treffer mit 1, bei Fehlern mit 2.
 
 ## Für Entwickler
 
