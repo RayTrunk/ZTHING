@@ -1,4 +1,4 @@
-//! Colour themes, shared with the Quill products (E:\Claude\hvk): the two
+//! Colour themes, shared with the Quill products: the two
 //! Quill themes come from the Quill logo, the others from the Quill editor.
 
 use eframe::egui::{self, Color32, Stroke};

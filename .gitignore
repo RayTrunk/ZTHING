@@ -3,3 +3,6 @@
 /examples/csharp/obj
 __pycache__/
 /dist
+# Specification and coding guide for the AI assistant, kept out of the repository.
+/SKILL.md
+/ZTHING_PROMPT.md

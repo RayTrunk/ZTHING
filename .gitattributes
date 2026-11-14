@@ -1,0 +1,9 @@
+# Line endings: LF in the repository, the platform default in working copies.
+* text=auto
+# Windows tools that expect CRLF.
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+*.cmd text eol=crlf
+# Binary assets.
+*.png binary
+*.ico binary
