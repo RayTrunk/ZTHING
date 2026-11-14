@@ -16,10 +16,10 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 use winsafe::prelude::*;
 use winsafe::{HEVENT, co};
 
-use zthing_gui::app::{self, App, Shared};
+use zthing_gui::app::{self, App, PreviewPane, Shared};
 use zthing_gui::config::{self, Theme};
-use zthing_gui::http;
 use zthing_gui::text::{self, Texts};
+use zthing_gui::{http, preview};
 
 /// Rendered from `assets/` by build.rs, the sizes must match the ones there.
 const WINDOW_ICON_SIZE: u32 = 256;
@@ -116,6 +116,9 @@ fn main() -> anyhow::Result<()> {
             let (jobs, received_jobs) = mpsc::channel();
             let (replies, received_replies) = mpsc::channel();
             app::spawn_client(shared.clone(), ctx.clone(), received_jobs, replies);
+            let (previews, preview_requests) = mpsc::channel();
+            let preview_result = Arc::new(std::sync::Mutex::new(None));
+            preview::spawn(ctx.clone(), preview_requests, preview_result.clone());
             let (open_shared, open_ctx) = (shared.clone(), ctx.clone());
             std::thread::spawn(move || {
                 while open_event.WaitForSingleObject(None).is_ok() {
@@ -142,6 +145,7 @@ fn main() -> anyhow::Result<()> {
                 prefix,
                 jobs,
                 received_replies,
+                PreviewPane::new(config.preview, previews, preview_result),
                 tray,
                 hotkeys,
             )))

@@ -24,6 +24,8 @@ tiny_http = "0.12.0"
 toml = "1.2.1"
 tray-icon = "0.24.2"
 winsafe = { version = "0.0.24", features = ["kernel", "user"] }
+# Thumbnails and the properties dialog, which winsafe does not wrap. Used in src/shell.rs only.
+windows = { version = "0.62.2", features = ["Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell"] }
 zthing-client = { version = "0.1.0", path = "../zthing-client" }
 
 [lints]

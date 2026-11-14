@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -18,12 +19,16 @@ use winsafe::prelude::*;
 use winsafe::{HWND, co};
 use zthing_client::{Client, ClientError, Hit, Page, Search, Sort, Status};
 
+use crate::preview::{Content, Preview};
+use crate::shell;
 use crate::text::Texts;
 
 /// How often the client thread asks for the status, which tells when the index changed.
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 /// Rows per request. The table asks for a page once one of its rows becomes visible.
 const PAGE: u64 = 200;
+/// `CREATE_NEW_CONSOLE`: a console program started from the window gets a window of its own.
+const CREATE_NEW_CONSOLE: u32 = 0x10;
 
 pub enum Service {
     Connecting,
@@ -192,8 +197,121 @@ impl Results {
 
 enum Action {
     Open(String),
+    OpenWith(String),
     OpenFolder(String),
+    Terminal { path: String, folder: bool },
     CopyPath(String),
+    CopyName(String),
+    Properties(String),
+}
+
+/// The pane right of the list. `on` starts from the setting, F3 toggles it.
+pub struct PreviewPane {
+    on: bool,
+    requests: Sender<String>,
+    result: Arc<Mutex<Option<Preview>>>,
+    shown: Option<Preview>,
+    /// The picture of `shown`, uploaded once instead of every frame.
+    texture: Option<egui::TextureHandle>,
+    /// Path of the last request, to ask for each selection once.
+    requested: Option<String>,
+}
+
+impl PreviewPane {
+    pub fn new(on: bool, requests: Sender<String>, result: Arc<Mutex<Option<Preview>>>) -> Self {
+        Self {
+            on,
+            requests,
+            result,
+            shown: None,
+            texture: None,
+            requested: None,
+        }
+    }
+
+    fn update(&mut self, ctx: &egui::Context, path: Option<&str>) {
+        if self.requested.as_deref() != path {
+            self.requested = path.map(str::to_owned);
+            if let Some(path) = path {
+                // The preview thread only stops when the window closes.
+                let _ = self.requests.send(path.to_owned());
+            }
+        }
+        if let Some(mut preview) = lock(&self.result).take() {
+            self.texture = match std::mem::replace(&mut preview.content, Content::None) {
+                Content::Image(image) => {
+                    Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR))
+                }
+                other => {
+                    preview.content = other;
+                    None
+                }
+            };
+            self.shown = Some(preview);
+        }
+    }
+
+    fn ui(&self, ui: &mut egui::Ui, texts: &Texts, hit: Option<&Hit>) {
+        let Some(hit) = hit else {
+            ui.weak(texts.no_selection);
+            return;
+        };
+        let path = hit.path.as_deref().unwrap_or_default();
+        let current = self.shown.as_ref().filter(|preview| preview.path == path);
+        ui.add(
+            egui::Label::new(egui::RichText::new(hit.name.as_deref().unwrap_or_default()).strong())
+                .wrap(),
+        );
+        ui.add(egui::Label::new(egui::RichText::new(path).weak()).wrap());
+        egui::Grid::new("preview-facts")
+            .num_columns(2)
+            .show(ui, |ui| {
+                if hit.folder != Some(true) {
+                    ui.label(texts.size);
+                    ui.label(format_size(hit.size.unwrap_or(0)));
+                    ui.end_row();
+                }
+                ui.label(texts.modified);
+                ui.label(format_date(hit.modified.unwrap_or(0)));
+                ui.end_row();
+                if let Some(created) = current.and_then(|preview| preview.created) {
+                    ui.label(texts.created);
+                    ui.label(format_date(created));
+                    ui.end_row();
+                }
+                if let Some(letters) = current
+                    .map(|preview| crate::preview::attribute_letters(preview.attributes))
+                    .filter(|letters| !letters.is_empty())
+                {
+                    ui.label(texts.attributes);
+                    ui.label(letters);
+                    ui.end_row();
+                }
+            });
+        ui.separator();
+        match (current, &self.texture) {
+            (None, _) => {
+                ui.spinner();
+            }
+            (
+                Some(Preview {
+                    content: Content::Text(text),
+                    ..
+                }),
+                _,
+            ) => {
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(text).monospace()).extend());
+                });
+            }
+            (Some(_), Some(texture)) => {
+                ui.add(egui::Image::new(texture).max_size(ui.available_size()));
+            }
+            (Some(_), None) => {
+                ui.weak(texts.no_preview);
+            }
+        }
+    }
 }
 
 pub struct App {
@@ -213,6 +331,7 @@ pub struct App {
     scroll_to_selected: bool,
     /// Input, sort and index version of the last search, to send each search once.
     sent: Option<(String, Sort, bool, Option<u64>)>,
+    preview: PreviewPane,
     _tray: Option<TrayIcon>,
     _hotkeys: Option<GlobalHotKeyManager>,
 }
@@ -225,6 +344,7 @@ impl App {
         prefix: String,
         jobs: Sender<Job>,
         replies: Receiver<Reply>,
+        preview: PreviewPane,
         tray: Option<TrayIcon>,
         hotkeys: Option<GlobalHotKeyManager>,
     ) -> Self {
@@ -242,6 +362,7 @@ impl App {
             selected: None,
             scroll_to_selected: false,
             sent: None,
+            preview,
             _tray: tray,
             _hotkeys: hotkeys,
         }
@@ -357,19 +478,51 @@ impl App {
     }
 
     fn run(&self, ctx: &egui::Context, action: Action) {
-        let started = match action {
-            Action::CopyPath(path) => {
-                ctx.copy_text(path);
+        let (program, started) = match action {
+            Action::CopyPath(text) | Action::CopyName(text) => {
+                ctx.copy_text(text);
                 return;
             }
-            Action::Open(path) => Command::new("explorer").arg(&path).spawn(),
+            Action::Properties(path) => {
+                if let Err(e) = shell::properties(&path) {
+                    self.shared.note(format!("{}: {e}", self.texts.properties));
+                }
+                return;
+            }
+            Action::Open(path) => ("explorer", Command::new("explorer").arg(&path).spawn()),
             // Explorer only parses the quoted form of `/select,`.
-            Action::OpenFolder(path) => Command::new("explorer")
-                .raw_arg(format!("/select,\"{path}\""))
-                .spawn(),
+            Action::OpenFolder(path) => (
+                "explorer",
+                Command::new("explorer")
+                    .raw_arg(format!("/select,\"{path}\""))
+                    .spawn(),
+            ),
+            // OpenAs_RunDLL takes the rest of the command line as the path, unquoted.
+            Action::OpenWith(path) => (
+                "rundll32",
+                Command::new("rundll32")
+                    .raw_arg(format!("shell32.dll,OpenAs_RunDLL {path}"))
+                    .spawn(),
+            ),
+            Action::Terminal { path, folder } => {
+                let dir = if folder {
+                    Path::new(&path)
+                } else {
+                    Path::new(&path).parent().unwrap_or(Path::new(&path))
+                };
+                // Windows Terminal where installed, PowerShell otherwise.
+                let started = Command::new("wt").arg("-d").arg(dir).spawn().or_else(|_| {
+                    Command::new("powershell")
+                        .arg("-NoExit")
+                        .current_dir(dir)
+                        .creation_flags(CREATE_NEW_CONSOLE)
+                        .spawn()
+                });
+                ("terminal", started)
+            }
         };
         if let Err(e) = started {
-            self.shared.note(format!("explorer: {e}"));
+            self.shared.note(format!("{program}: {e}"));
         }
     }
 }
@@ -411,6 +564,16 @@ impl eframe::App for App {
         self.receive();
         let mut action = self.keyboard(ctx);
         let texts = self.texts;
+        if ctx.input(|i| i.key_pressed(Key::F3)) {
+            self.preview.on = !self.preview.on;
+        }
+        let selected_hit = self.selected.and_then(|row| self.shown.hit(row)).cloned();
+        if self.preview.on {
+            self.preview.update(
+                ctx,
+                selected_hit.as_ref().and_then(|hit| hit.path.as_deref()),
+            );
+        }
 
         egui::TopBottomPanel::top("search").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -448,6 +611,13 @@ impl eframe::App for App {
                 }
             });
         });
+
+        if self.preview.on {
+            egui::SidePanel::right("preview")
+                .resizable(true)
+                .default_width(360.0)
+                .show(ctx, |ui| self.preview.ui(ui, texts, selected_hit.as_ref()));
+        }
 
         let mut sort_by = None;
         let mut missing = Vec::new();
@@ -506,15 +676,17 @@ impl eframe::App for App {
                         };
                         row.set_selected(*selected == Some(position));
                         let path = hit.path.clone().unwrap_or_default();
+                        let name = hit.name.clone().unwrap_or_default();
+                        let is_folder = hit.folder == Some(true);
                         let folder = path.rsplit_once('\\').map_or("", |(folder, _)| folder);
                         row.col(|ui| {
-                            ui.label(hit.name.as_deref().unwrap_or_default());
+                            ui.label(&name);
                         });
                         row.col(|ui| {
                             ui.label(folder);
                         });
                         row.col(|ui| {
-                            if hit.folder != Some(true) {
+                            if !is_folder {
                                 ui.label(format_size(hit.size.unwrap_or(0)));
                             }
                         });
@@ -529,17 +701,30 @@ impl eframe::App for App {
                             action = Some(Action::Open(path.clone()));
                         }
                         response.context_menu(|ui| {
-                            if ui.button(texts.open).clicked() {
-                                action = Some(Action::Open(path.clone()));
-                                ui.close();
-                            }
-                            if ui.button(texts.open_folder).clicked() {
-                                action = Some(Action::OpenFolder(path.clone()));
-                                ui.close();
-                            }
-                            if ui.button(texts.copy_path).clicked() {
-                                action = Some(Action::CopyPath(path.clone()));
-                                ui.close();
+                            let entries = [
+                                (texts.open, Action::Open(path.clone())),
+                                (texts.open_with, Action::OpenWith(path.clone())),
+                                (texts.open_folder, Action::OpenFolder(path.clone())),
+                                (
+                                    texts.terminal,
+                                    Action::Terminal {
+                                        path: path.clone(),
+                                        folder: is_folder,
+                                    },
+                                ),
+                                (texts.copy_path, Action::CopyPath(path.clone())),
+                                (texts.copy_name, Action::CopyName(name.clone())),
+                                (texts.properties, Action::Properties(path.clone())),
+                            ];
+                            for (position, (label, entry)) in entries.into_iter().enumerate() {
+                                // Groups: open, copy, properties.
+                                if position == 4 || position == 6 {
+                                    ui.separator();
+                                }
+                                if ui.button(label).clicked() {
+                                    action = Some(entry);
+                                    ui.close();
+                                }
                             }
                         });
                     });

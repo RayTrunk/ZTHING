@@ -19,6 +19,9 @@ hotkey = "Alt+Space"
 # system, light or dark
 theme = "system"
 
+# Preview pane right of the list. F3 shows or hides it while ZTHING runs.
+preview = true
+
 # HTTP API for other programs: GET /search and GET /status on 127.0.0.1 only.
 # Requests send the token as "Authorization: Bearer <token>" or as ?token=<token>.
 # It runs while this window runs, with the rights of the logged-on user.
@@ -35,6 +38,7 @@ pub struct Config {
     pub exclude: Vec<String>,
     pub hotkey: String,
     pub theme: Theme,
+    pub preview: bool,
     pub http: Http,
 }
 
@@ -71,6 +75,7 @@ impl Default for Config {
             exclude: Vec::new(),
             hotkey: "Alt+Space".to_owned(),
             theme: Theme::System,
+            preview: true,
             http: Http::default(),
         }
     }
