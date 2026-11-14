@@ -65,7 +65,7 @@ fn mft_matches_walkdir() {
         .to_ascii_uppercase();
     let volume = NtfsVolume::open(drive).unwrap();
     let mut index = Index::new();
-    volume.read(&mut index).unwrap();
+    volume.read(&mut index, 0).unwrap();
 
     let prefix = format!("{}\\", base.display()).to_lowercase();
     let mut actual: Vec<Entry> = (0..index.len() as u32)

@@ -36,9 +36,21 @@ pub struct Context<'a> {
 #[derive(Default)]
 pub struct Session {
     previous: Option<Previous>,
-    /// Folder id and whether the client may list it, valid for `access_epoch`.
-    access: HashMap<u32, bool>,
-    access_epoch: u64,
+}
+
+/// Whether one user may list folders. The service keeps one per user across connections.
+#[derive(Default)]
+pub struct AccessCache {
+    allowed: HashMap<AccessKey, bool>,
+    epoch: u64,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum AccessKey {
+    /// All folders of one access group share the answer.
+    Group(u32),
+    /// A folder of unknown group, valid until its id changes.
+    Folder(u32),
 }
 
 /// The last search, kept so paging does not search again and so a longer
@@ -58,6 +70,7 @@ pub fn handle(
     context: &Context<'_>,
     session: &mut Session,
     access: Option<&dyn Access>,
+    cache: &mut AccessCache,
 ) -> io::Result<Response> {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
@@ -97,7 +110,7 @@ pub fn handle(
                 .search(&query, None, &AtomicBool::new(false))
                 .unwrap_or_default();
             if let Some(access) = access {
-                filter(index, &mut ids, session, context.epoch, access)?;
+                filter(index, &mut ids, cache, context.epoch, access)?;
             }
             response.total = Some(ids.len() as u64);
         }
@@ -106,7 +119,7 @@ pub fn handle(
                 return Ok(failure(id, NOT_READY.to_owned()));
             };
             let start = Instant::now();
-            if let Err(e) = run_search(index, &search, context, session, access) {
+            if let Err(e) = run_search(index, &search, context, session, access, cache) {
                 return match e {
                     SearchError::Query(message) => Ok(failure(id, message)),
                     SearchError::Access(e) => Err(e),
@@ -145,6 +158,7 @@ fn run_search(
     context: &Context<'_>,
     session: &mut Session,
     access: Option<&dyn Access>,
+    cache: &mut AccessCache,
 ) -> Result<(), SearchError> {
     let current = |p: &Previous| p.version == context.version;
     if session.previous.as_ref().is_some_and(|p| {
@@ -166,7 +180,7 @@ fn run_search(
         .search(&query, within, &AtomicBool::new(false))
         .unwrap_or_default();
     if let Some(access) = access {
-        filter(index, &mut ids, session, context.epoch, access).map_err(SearchError::Access)?;
+        filter(index, &mut ids, cache, context.epoch, access).map_err(SearchError::Access)?;
     }
     index.sort(
         &mut ids,
@@ -196,21 +210,30 @@ fn run_search(
 fn filter(
     index: &Index,
     ids: &mut Vec<u32>,
-    session: &mut Session,
+    cache: &mut AccessCache,
     epoch: u64,
     access: &dyn Access,
 ) -> io::Result<()> {
-    if session.access_epoch != epoch {
-        session.access.clear();
-        session.access_epoch = epoch;
+    if cache.epoch != epoch {
+        // Folder ids change with the epoch, access groups do not.
+        cache
+            .allowed
+            .retain(|key, _| matches!(key, AccessKey::Group(_)));
+        cache.epoch = epoch;
     }
-    let cache = &mut session.access;
+    let allowed = &mut cache.allowed;
     access.as_client(&mut || {
         ids.retain(|&id| match index.parent(id) {
             None => true,
-            Some(folder) => *cache
-                .entry(folder)
-                .or_insert_with(|| access.can_list(&index.path(folder))),
+            Some(folder) => {
+                let key = match index.group(folder) {
+                    0 => AccessKey::Folder(folder),
+                    group => AccessKey::Group(group),
+                };
+                *allowed
+                    .entry(key)
+                    .or_insert_with(|| access.can_list(&index.path(folder)))
+            }
         });
     })
 }
@@ -289,7 +312,7 @@ mod tests {
         session: &mut Session,
         access: Option<&dyn Access>,
     ) -> Response {
-        handle(line, context, session, access).unwrap()
+        handle(line, context, session, access, &mut AccessCache::default()).unwrap()
     }
 
     fn paths(response: &Response) -> Vec<String> {
@@ -412,5 +435,27 @@ mod tests {
             None,
         );
         assert_eq!(version.protocol, Some(PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn folders_of_one_access_group_share_the_answer() {
+        let mut index = index();
+        let other = index
+            .push("Other", Some(0), ATTRIBUTE_DIRECTORY, 0, 0)
+            .unwrap();
+        index.push("x.txt", Some(other), 0, 1, 0).unwrap();
+        // "Secret" (id 2) is checked first and denied, which also covers "Other".
+        index.set_group(2, 7);
+        index.set_group(other, 7);
+        let context = context(&index);
+        let response = handle(
+            r#"{"v":1,"id":1,"cmd":"count","query":".txt"}"#,
+            &context,
+            &mut Session::default(),
+            Some(&DenySecret),
+            &mut AccessCache::default(),
+        )
+        .unwrap();
+        assert_eq!(response.total, Some(3));
     }
 }

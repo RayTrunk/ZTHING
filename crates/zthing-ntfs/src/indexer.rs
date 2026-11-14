@@ -112,9 +112,9 @@ impl Indexer {
         let mut kept = Vec::new();
         self.index = Index::new();
         self.states.clear();
-        for volume in self.volumes.drain(..) {
+        for (number, volume) in self.volumes.drain(..).enumerate() {
             let first = self.index.len() as u32;
-            match volume.read(&mut self.index) {
+            match volume.read(&mut self.index, number as u8) {
                 Ok(state) => {
                     kept.push(volume);
                     self.states.push(state);

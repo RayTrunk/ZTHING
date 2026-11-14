@@ -36,7 +36,7 @@ pub enum IndexError {
 
 const FORMAT_MAGIC: &[u8; 8] = b"ZTHINGIX";
 /// Raised whenever the layout written by [`Index::save`] changes.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const ENTRY_BYTES: usize = 32;
 /// Entries parsed per read while loading.
 const LOAD_CHUNK: usize = 4096;
@@ -88,6 +88,9 @@ pub struct Index {
     /// Case-folded copy with the same byte layout as `names`, so one offset addresses both.
     names_folded: String,
     entries: Vec<Entry>,
+    /// Access group per entry, 0 if unknown. Entries of one group share their
+    /// access rights, so an access check per group covers all of them.
+    groups: Vec<u32>,
     /// Built by the first `path:` search and dropped on every change to the entries.
     folder_paths: OnceLock<FolderPaths>,
 }
@@ -119,6 +122,7 @@ impl Index {
             return Err(self.full(name));
         }
         let name_offset = self.append_name(name)?;
+        self.groups.push(0);
         self.entries.push(Entry {
             name_offset,
             name_len: name.len() as u32,
@@ -215,6 +219,7 @@ impl Index {
             names: String::with_capacity(with_headroom(live_names)),
             names_folded: String::with_capacity(with_headroom(live_names)),
             entries: Vec::with_capacity(with_headroom(next as usize)),
+            groups: Vec::with_capacity(with_headroom(next as usize)),
             folder_paths: OnceLock::new(),
         };
         for (old, entry) in self.entries.iter().enumerate() {
@@ -223,6 +228,7 @@ impl Index {
             }
             let start = entry.name_offset as usize;
             let end = start + entry.name_len as usize;
+            compacted.groups.push(self.groups[old]);
             compacted.entries.push(Entry {
                 name_offset: compacted.names.len() as u32,
                 parent: match entry.parent {
@@ -258,6 +264,9 @@ impl Index {
             bytes[16..24].copy_from_slice(&entry.size.to_le_bytes());
             bytes[24..32].copy_from_slice(&entry.modified.to_le_bytes());
             out.write_all(&bytes)?;
+        }
+        for group in &self.groups {
+            out.write_all(&group.to_le_bytes())?;
         }
         Ok(())
     }
@@ -324,12 +333,26 @@ impl Index {
                 entries.push(entry);
             }
         }
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(with_headroom(count))
+            .map_err(|_| LoadError::Damaged("length too large"))?;
+        while groups.len() < count {
+            let len = (count - groups.len()).min(LOAD_CHUNK) * 4;
+            fill(input, &mut chunk[..len])?;
+            groups.extend(
+                chunk[..len]
+                    .chunks_exact(4)
+                    .map(|group| u32::from_le_bytes([group[0], group[1], group[2], group[3]])),
+            );
+        }
         let mut names_folded = String::with_capacity(with_headroom(names.len()));
         fold_case_into(&mut names_folded, &names);
         Ok(Self {
             names,
             names_folded,
             entries,
+            groups,
             folder_paths: OnceLock::new(),
         })
     }
@@ -404,6 +427,15 @@ impl Index {
         (parent != NO_PARENT && parent != REMOVED).then_some(parent)
     }
 
+    /// 0 if unknown.
+    pub fn group(&self, id: u32) -> u32 {
+        self.groups[id as usize]
+    }
+
+    pub fn set_group(&mut self, id: u32, group: u32) {
+        self.groups[id as usize] = group;
+    }
+
     pub fn is_dir(&self, id: u32) -> bool {
         self.entries[id as usize].attributes & ATTRIBUTE_DIRECTORY != 0
     }
@@ -423,12 +455,14 @@ impl Index {
         self.names_folded
             .shrink_to(with_headroom(self.names_folded.len()));
         self.entries.shrink_to(with_headroom(self.entries.len()));
+        self.groups.shrink_to(with_headroom(self.groups.len()));
     }
 
     pub fn heap_size(&self) -> usize {
         self.names.capacity()
             + self.names_folded.capacity()
             + self.entries.capacity() * size_of::<Entry>()
+            + self.groups.capacity() * size_of::<u32>()
             + self.folder_paths.get().map_or(0, |paths| {
                 paths.text.capacity() + paths.spans.capacity() * size_of::<(u32, Range<usize>)>()
             })

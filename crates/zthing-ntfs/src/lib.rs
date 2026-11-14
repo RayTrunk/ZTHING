@@ -34,7 +34,10 @@ const READ_SIZE: usize = 4 << 20;
 /// Covers every common sector size.
 const SECTOR_ALIGNMENT: usize = 4096;
 const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
+const USN_REASON_SECURITY_CHANGE: u32 = 0x0000_0800;
 const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
+/// Access group = (volume number + 1) << 24 | NTFS security id.
+const GROUP_SHIFT: u32 = 24;
 const OVERWRITTEN: &str = "journal entries since the last update were overwritten";
 
 #[derive(Debug, thiserror::Error)]
@@ -119,8 +122,10 @@ impl NtfsVolume {
     }
 
     /// Adds a root entry such as `C:` and every file and folder below it,
-    /// with attributes, size and modification date.
-    pub fn read(&self, index: &mut Index) -> Result<VolumeState, NtfsError> {
+    /// with attributes, size, modification date and access group. `volume_number`
+    /// keeps the access groups of different volumes apart.
+    pub fn read(&self, index: &mut Index, volume_number: u8) -> Result<VolumeState, NtfsError> {
+        let group_base = (u32::from(volume_number) + 1) << GROUP_SHIFT;
         // Queried before the $MFT is read, so replaying from this position also
         // catches the changes made while the read runs.
         let journal = self.journal()?.map(|journal| Journal {
@@ -185,7 +190,7 @@ impl NtfsVolume {
                         }
                         (id, _) => id,
                     };
-                    apply_metadata(index, id, &file);
+                    apply_metadata(index, id, &file, group_base);
                 }
                 offset += len as u64;
                 remaining -= valid as u64;
@@ -329,6 +334,10 @@ impl NtfsVolume {
             }
         };
         index.set_attributes(id, change.attributes);
+        if existing.is_none() || change.reason & USN_REASON_SECURITY_CHANGE != 0 {
+            // The journal entry carries no security id, so access is checked for this folder alone.
+            index.set_group(id, 0);
+        }
         refresh.insert(change.record, change.file_reference);
         Ok(())
     }
@@ -418,8 +427,14 @@ fn decode_name(utf16: &[u8], out: &mut String) {
 }
 
 /// Attributes only come from base records, which hold `$STANDARD_INFORMATION`.
-fn apply_metadata(index: &mut Index, id: u32, file: &FileRecord<'_>) {
+fn apply_metadata(index: &mut Index, id: u32, file: &FileRecord<'_>, group_base: u32) {
     if file.base.is_none() {
+        // Security ids beyond the group bits stay unknown and get checked folder by folder.
+        let group = file
+            .security
+            .filter(|&security| security < 1 << GROUP_SHIFT)
+            .map_or(0, |security| group_base | security);
+        index.set_group(id, group);
         let directory = if file.directory {
             ATTRIBUTE_DIRECTORY
         } else {

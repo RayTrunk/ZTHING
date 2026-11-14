@@ -7,6 +7,7 @@
 mod pipe;
 mod server;
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -64,6 +65,8 @@ struct Shared {
     epoch: AtomicU64,
     notes: Mutex<Vec<String>>,
     stop: AtomicBool,
+    /// Access answers per user SID, shared by all connections of that user.
+    caches: Mutex<HashMap<String, Arc<Mutex<server::AccessCache>>>>,
 }
 
 impl Shared {
@@ -277,6 +280,16 @@ fn spawn_indexer(shared: Arc<Shared>, path: PathBuf) -> thread::JoinHandle<()> {
 }
 
 fn serve_client(connection: &pipe::Connection, shared: &Shared, filter: bool) {
+    let cache = if filter {
+        // Without the client's identity the filter cannot work, so the connection ends.
+        let Ok(sid) = connection.client_sid() else {
+            return;
+        };
+        let mut caches = shared.caches.lock().unwrap_or_else(PoisonError::into_inner);
+        caches.entry(sid).or_default().clone()
+    } else {
+        Arc::default()
+    };
     let mut reader = BufReader::new(connection);
     let mut writer = connection;
     let access = ClientAccess(connection);
@@ -299,7 +312,9 @@ fn serve_client(connection: &pipe::Connection, shared: &Shared, filter: bool) {
             status: status(shared, guard.as_ref()),
         };
         let access: Option<&dyn server::Access> = filter.then_some(&access);
-        let response = server::handle(&line, &context, &mut session, access);
+        let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        let response = server::handle(&line, &context, &mut session, access, &mut cache);
+        drop(cache);
         drop(guard);
         // An impersonation error ends the connection, see `pipe::Connection::impersonate`.
         let Ok(response) = response else {

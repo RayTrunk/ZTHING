@@ -9,9 +9,12 @@ use windows::Win32::Foundation::{
     LocalFree,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{PSECURITY_DESCRIPTOR, RevertToSelf, SECURITY_ATTRIBUTES};
+use windows::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, RevertToSelf, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+    TOKEN_USER, TokenUser,
+};
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
@@ -20,7 +23,8 @@ use windows::Win32::System::Pipes::{
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
     PIPE_WAIT,
 };
-use windows::core::HSTRING;
+use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use windows::core::{HSTRING, PWSTR};
 
 /// Denies network logons, gives SYSTEM and administrators full access and lets
 /// interactively logged-on users read and write. `P` blocks inherited entries.
@@ -90,6 +94,11 @@ pub fn accept(name: &str, first: bool) -> io::Result<Connection> {
 }
 
 impl Connection {
+    /// The client's SID such as `S-1-5-21-…`, which keys the per-user access cache.
+    pub fn client_sid(&self) -> io::Result<String> {
+        self.impersonate(thread_user_sid)?
+    }
+
     /// Runs `f` with the access rights of the client. If reverting fails the
     /// error ends the connection thread, which takes the client identity with it.
     pub fn impersonate<T>(&self, f: impl FnOnce() -> T) -> io::Result<T> {
@@ -139,4 +148,41 @@ impl Drop for Connection {
             let _ = CloseHandle(self.handle);
         }
     }
+}
+
+/// SID of the user the current thread acts for. Called while impersonating.
+fn thread_user_sid() -> io::Result<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: `token` outlives the call and is closed below. Opening as self
+    // checks the service's own rights, which may read its threads' tokens.
+    unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
+        .map_err(io::Error::other)?;
+    // u64 elements give the 8-byte alignment that TOKEN_USER needs. 64 bytes
+    // hold the largest SID plus the TOKEN_USER header.
+    let mut buffer = [0u64; 16];
+    let mut len = 0u32;
+    // SAFETY: the buffer and `len` outlive the call, the size matches the buffer.
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            size_of_val(&buffer) as u32,
+            &mut len,
+        )
+    };
+    // SAFETY: the token came from OpenThreadToken and is closed exactly once.
+    let _ = unsafe { CloseHandle(token) };
+    read.map_err(io::Error::other)?;
+    // SAFETY: GetTokenInformation filled the aligned buffer with a TOKEN_USER
+    // whose SID pointer points into the same buffer.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let mut text = PWSTR::null();
+    // SAFETY: the SID stays valid while `buffer` lives. `text` is freed below.
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.map_err(io::Error::other)?;
+    // SAFETY: ConvertSidToStringSidW returned a null-terminated wide string.
+    let sid = unsafe { text.to_string() }.map_err(io::Error::other);
+    // SAFETY: the string came from ConvertSidToStringSidW, which allocates with LocalAlloc.
+    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    sid
 }

@@ -117,6 +117,8 @@ pub(crate) struct FileRecord<'a> {
     pub attributes: Option<u32>,
     /// Unix seconds (UTC).
     pub modified: Option<i64>,
+    /// Index into the volume's $Secure, shared by files with identical security descriptors.
+    pub security: Option<u32>,
     pub size: Option<u64>,
     /// Parent record number and UTF-16LE name of the first long `$FILE_NAME`.
     /// Further hard links of the same file are ignored.
@@ -139,6 +141,7 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
         attributes: None,
         modified: None,
         size: None,
+        security: None,
         name: None,
     };
     for (kind, attr) in attributes(record) {
@@ -150,6 +153,10 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
                 let filetime = u64_at(attr, content + 8)?;
                 file.modified = Some(unix_from_filetime(filetime));
                 file.attributes = Some(u32_at(attr, content + 32)?);
+                // NTFS 1.2 wrote a 48-byte $STANDARD_INFORMATION without the security id.
+                if u32_at(attr, 16)? >= 72 {
+                    file.security = Some(u32_at(attr, content + 52)?);
+                }
             }
             ATTR_FILE_NAME if !non_resident && file.name.is_none() => {
                 let content = usize::from(u16_at(attr, 20)?);
@@ -357,6 +364,7 @@ mod tests {
                 attributes: Some(0x20),
                 modified: Some(NOON),
                 size: Some(400),
+                security: None,
                 name: Some((5, long_name.as_slice())),
             })
         );

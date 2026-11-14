@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
     let volume = NtfsVolume::open(drive)?;
     let mut index = Index::new();
-    let records = volume.read(&mut index)?;
+    let records = volume.read(&mut index, 0)?;
     index.shrink_to_fit();
     let indexed = start.elapsed();
 
