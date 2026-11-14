@@ -153,6 +153,11 @@ impl Volume {
     }
 }
 
+// SAFETY: a HANDLE is valid in every thread of the process. Win32 serializes
+// the synchronous calls made on it, and `Volume` never hands out the raw handle.
+unsafe impl Send for Volume {}
+unsafe impl Sync for Volume {}
+
 impl Drop for Volume {
     fn drop(&mut self) {
         // SAFETY: the handle came from CreateFileW and is closed exactly once.

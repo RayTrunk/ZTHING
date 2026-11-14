@@ -6,7 +6,28 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "zthing-gui"
+path = "src/main.rs"
+# The embedded administrator manifest would keep a test binary from starting.
+test = false
+
 [dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+eframe = "0.32.3"
+egui_extras = "0.32.3"
+global-hotkey = "0.10.0"
+serde = { version = "1.0.229", features = ["derive"] }
+sys-locale = "0.3.2"
+toml = "1.2.1"
+tray-icon = "0.24.2"
+winsafe = { version = "0.0.24", features = ["user"] }
+zthing-core = { version = "0.1.0", path = "../zthing-core" }
+zthing-ntfs = { version = "0.1.0", path = "../zthing-ntfs" }
 
 [lints]
 workspace = true
+
+[build-dependencies]
+embed-manifest = "1.5.1"

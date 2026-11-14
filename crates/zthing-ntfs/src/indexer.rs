@@ -121,7 +121,8 @@ impl Indexer {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let temporary = path.with_extension("tmp");
+        // The GUI and zt share the file, so each process writes its own temporary file.
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         let mut out = BufWriter::new(File::create(&temporary)?);
         out.write_all(FILE_MAGIC)?;
         out.write_all(&FILE_VERSION.to_le_bytes())?;
