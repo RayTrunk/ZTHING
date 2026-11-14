@@ -62,15 +62,15 @@ $zip = "$out.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path $out -DestinationPath $zip
 
-$iscc = Get-Command iscc -ErrorAction SilentlyContinue
+$iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
 if (-not $iscc) {
     # Machine-wide or, as winget installs it, for the current user only.
-    $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+    $iscc = (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
         "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+        Select-Object -First 1).FullName
 }
 if ($iscc) {
-    & $iscc.FullName "/DVersion=$version" "/DSource=$out" installer\zthing.iss
+    & $iscc "/DVersion=$version" "/DSource=$out" installer\zthing.iss
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
     Sign "$dist\ZTHING-$version-setup.exe"
 } else {
