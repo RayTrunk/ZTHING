@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use zthing_core::{ATTRIBUTE_DIRECTORY, Index, Now, Query, QueryError, SortKey};
+use zthing_core::{ATTRIBUTE_DIRECTORY, Index, LoadError, Now, Query, QueryError, SortKey};
 
 const DAY: i64 = 86_400;
 /// 2026-03-15 12:00 UTC, 13:00 local time in CET.
@@ -330,4 +330,100 @@ fn removed_entries_disappear_from_searches() {
     index.remove(hits[0]);
     assert!(index.is_removed(hits[0]));
     assert_eq!(index.search(&query, None, &cancel), Some(vec![hits[1]]));
+}
+
+#[test]
+fn renamed_entries_are_found_by_their_new_name() {
+    let mut index = sample();
+    let cancel = AtomicBool::new(false);
+    let zebra = index
+        .search(&Query::parse("zebra", NOW).unwrap(), None, &cancel)
+        .unwrap()[0];
+    index.set_name(zebra, "Giraffe.png").unwrap();
+    assert_eq!(index.path(zebra), r"C:\Projects\Giraffe.png");
+    assert_eq!(
+        index.search(&Query::parse("zebra", NOW).unwrap(), None, &cancel),
+        Some(vec![])
+    );
+    assert_eq!(
+        index.search(&Query::parse("giraffe", NOW).unwrap(), None, &cancel),
+        Some(vec![zebra])
+    );
+}
+
+#[test]
+fn saved_index_loads_with_the_same_content() {
+    let mut index = sample();
+    index.remove(1);
+    let mut file = Vec::new();
+    index.save(&mut file).unwrap();
+    let loaded = Index::load(&mut file.as_slice()).unwrap();
+
+    assert_eq!(loaded.len(), index.len());
+    for id in 0..index.len() as u32 {
+        assert_eq!(loaded.is_removed(id), index.is_removed(id));
+        if !index.is_removed(id) {
+            assert_eq!(
+                (
+                    loaded.path(id),
+                    loaded.size(id),
+                    loaded.modified(id),
+                    loaded.is_dir(id)
+                ),
+                (
+                    index.path(id),
+                    index.size(id),
+                    index.modified(id),
+                    index.is_dir(id)
+                )
+            );
+        }
+    }
+    let query = Query::parse("ärger", NOW).unwrap();
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        loaded.search(&query, None, &cancel),
+        index.search(&query, None, &cancel)
+    );
+}
+
+#[test]
+fn foreign_or_damaged_files_are_rejected() {
+    let mut file = Vec::new();
+    sample().save(&mut file).unwrap();
+
+    let mut other_version = file.clone();
+    other_version[8] = other_version[8].wrapping_add(1);
+    assert!(matches!(
+        Index::load(&mut other_version.as_slice()),
+        Err(LoadError::Version { .. })
+    ));
+
+    let truncated = &file[..file.len() - 1];
+    assert!(matches!(
+        Index::load(&mut &truncated[..]),
+        Err(LoadError::Damaged(_))
+    ));
+
+    // A name offset pointing into the middle of 'Ä' must not be accepted.
+    let mut bad_offset = file.clone();
+    let names_len = u64::from_le_bytes(file[20..28].try_into().unwrap()) as usize;
+    let first_entry = 28 + names_len;
+    let entry_with_umlaut = first_entry + 5 * 32;
+    let offset = u32::from_le_bytes(
+        bad_offset[entry_with_umlaut..entry_with_umlaut + 4]
+            .try_into()
+            .unwrap(),
+    );
+    bad_offset[entry_with_umlaut..entry_with_umlaut + 4]
+        .copy_from_slice(&(offset + 1).to_le_bytes());
+    assert!(matches!(
+        Index::load(&mut bad_offset.as_slice()),
+        Err(LoadError::Damaged(_))
+    ));
+
+    assert!(matches!(
+        Index::load(&mut &b"not an index at all"[..]),
+        Err(LoadError::Damaged(_) | LoadError::Io(_))
+    ));
 }

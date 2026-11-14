@@ -1,17 +1,27 @@
-//! Reads NTFS volumes into a [`zthing_core::Index`] by parsing the raw $MFT.
-//! Opening a volume needs administrator rights.
+//! Reads NTFS volumes into a [`zthing_core::Index`] by parsing the raw $MFT and
+//! keeps the index current through the USN journal. Needs administrator rights.
 
+mod indexer;
 mod parse;
 mod volume;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Range;
 
-use windows::Win32::System::Ioctl::FSCTL_GET_NTFS_VOLUME_DATA;
+use windows::Win32::Foundation::{
+    ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_ENTRY_DELETED, ERROR_JOURNAL_NOT_ACTIVE,
+};
+use windows::Win32::System::Ioctl::{
+    FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL,
+    READ_USN_JOURNAL_DATA_V0,
+};
 use zthing_core::{ATTRIBUTE_DIRECTORY, Index, IndexError};
 
+use parse::{FileRecord, JournalData, Layout, UsnChange};
 use volume::Volume;
 
+pub use indexer::{Indexer, OpenReport};
 pub use volume::fixed_drives;
 
 /// MFT record of the root folder on every NTFS volume.
@@ -23,6 +33,9 @@ const NO_ID: u32 = u32::MAX;
 const READ_SIZE: usize = 4 << 20;
 /// Covers every common sector size.
 const SECTOR_ALIGNMENT: usize = 4096;
+const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
+const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
+const OVERWRITTEN: &str = "journal entries since the last update were overwritten";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NtfsError {
@@ -36,23 +49,45 @@ pub enum NtfsError {
     },
     #[error("{drive}: cannot read the $MFT: {reason}")]
     Mft { drive: char, reason: &'static str },
+    /// The journal cannot be replayed, so the volume has to be read again.
+    #[error("{drive}: {reason}")]
+    Journal { drive: char, reason: &'static str },
     #[error(transparent)]
     Index(#[from] IndexError),
 }
 
-/// Index id per MFT record number of one volume.
-pub struct Records {
+/// Everything needed to keep one volume's entries current. Saved with the index.
+pub struct VolumeState {
+    drive: char,
+    serial: u64,
+    /// `None` if the volume has no active USN journal.
+    journal: Option<Journal>,
+    root: u32,
+    /// Index id per MFT record number.
     ids: Vec<u32>,
 }
 
-impl Records {
-    pub fn get(&self, record: u64) -> Option<u32> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Journal {
+    id: u64,
+    next_usn: i64,
+}
+
+impl VolumeState {
+    pub fn id(&self, record: u64) -> Option<u32> {
         let id = *self.ids.get(usize::try_from(record).ok()?)?;
         (id != NO_ID).then_some(id)
     }
 
     pub fn heap_size(&self) -> usize {
         self.ids.capacity() * size_of::<u32>()
+    }
+
+    fn forget(&mut self, index: &mut Index, record: usize) {
+        if let Some(id) = self.ids.get_mut(record).filter(|id| **id != NO_ID) {
+            index.remove(*id);
+            *id = NO_ID;
+        }
     }
 }
 
@@ -79,27 +114,23 @@ impl NtfsVolume {
         Ok(Self { drive, volume })
     }
 
+    pub fn drive(&self) -> char {
+        self.drive
+    }
+
     /// Adds a root entry such as `C:` and every file and folder below it,
     /// with attributes, size and modification date.
-    pub fn read(&self, index: &mut Index) -> Result<Records, NtfsError> {
-        let mut data = [0u8; 128];
-        let len = self
-            .volume
-            .ioctl(FSCTL_GET_NTFS_VOLUME_DATA, &(), &mut data)
-            .map_err(|source| self.error("reading the volume layout", source))?;
-        let layout =
-            parse::layout(&data[..len]).ok_or_else(|| self.mft_error("volume data too short"))?;
-        // Whole records per cluster keep every read aligned to record boundaries.
-        if layout.record == 0 || layout.cluster % layout.record as u64 != 0 {
-            return Err(self.mft_error("clusters are smaller than file records"));
-        }
-
-        let cluster = layout.cluster as usize;
+    pub fn read(&self, index: &mut Index) -> Result<VolumeState, NtfsError> {
+        // Queried before the $MFT is read, so replaying from this position also
+        // catches the changes made while the read runs.
+        let journal = self.journal()?.map(|journal| Journal {
+            id: journal.id,
+            next_usn: journal.next_usn,
+        });
+        let layout = self.layout()?;
         let mut storage = Vec::new();
-        let buf = aligned(&mut storage, READ_SIZE.max(cluster));
-        self.read_at(layout.mft_offset, &mut buf[..cluster])?;
-        let extents = parse::mft_extents(&mut buf[..layout.record], layout.cluster)
-            .ok_or_else(|| self.mft_error("record 0 has no readable $DATA runs"))?;
+        let buf = aligned(&mut storage, READ_SIZE.max(layout.cluster as usize));
+        let extents = self.mft_extents(&layout, buf)?;
         if extents.iter().map(|e| e.end - e.start).sum::<u64>() < layout.mft_len {
             return Err(self.mft_error("its runs continue in an attribute list"));
         }
@@ -114,7 +145,7 @@ impl NtfsVolume {
         let mut name = String::new();
         let mut record = 0usize;
         let mut remaining = layout.mft_len;
-        for extent in extents {
+        for extent in &extents {
             let mut offset = extent.start;
             while offset < extent.end && remaining > 0 {
                 let len = (extent.end - offset)
@@ -137,15 +168,7 @@ impl NtfsVolume {
                     }
                     let id = match (ids[target], file.name) {
                         (NO_ID, Some((parent, utf16))) => {
-                            name.clear();
-                            name.extend(
-                                char::decode_utf16(
-                                    utf16
-                                        .chunks_exact(2)
-                                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
-                                )
-                                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
-                            );
+                            decode_name(utf16, &mut name);
                             let id = index.push(&name, None, 0, 0, 0)?;
                             ids[target] = id;
                             parents.push((id, parent));
@@ -162,27 +185,20 @@ impl NtfsVolume {
                         }
                         (id, _) => id,
                     };
-                    if file.base.is_none() {
-                        let directory = if file.directory {
-                            ATTRIBUTE_DIRECTORY
-                        } else {
-                            0
-                        };
-                        index.set_attributes(id, file.attributes.unwrap_or(0) | directory);
-                    }
-                    if let Some(size) = file.size {
-                        index.set_size(id, size);
-                    }
-                    if let Some(modified) = file.modified {
-                        index.set_modified(id, modified);
-                    }
+                    apply_metadata(index, id, &file);
                 }
                 offset += len as u64;
                 remaining -= valid as u64;
             }
         }
 
-        let records = Records { ids };
+        let state = VolumeState {
+            drive: self.drive,
+            serial: layout.serial,
+            journal,
+            root,
+            ids,
+        };
         // Some internal files, such as $RmMetadata, name the root as parent in
         // their $FILE_NAME but are missing from the root's directory listing.
         // Without a listing every root child is kept.
@@ -192,8 +208,172 @@ impl NtfsVolume {
                     .map(|entry| entry.file_name().to_string_lossy().into_owned())
                     .collect()
             });
-        link_parents(index, &records, root, &parents, root_listing.as_ref());
-        Ok(records)
+        link_parents(index, &state, &parents, root_listing.as_ref());
+        Ok(state)
+    }
+
+    /// Applies the journal entries written since the last call and returns how
+    /// many there were. A volume without journal reports none.
+    /// [`NtfsError::Journal`] means the volume has to be read again.
+    pub fn catch_up(&self, index: &mut Index, state: &mut VolumeState) -> Result<usize, NtfsError> {
+        let Some(saved) = state.journal else {
+            return Ok(0);
+        };
+        let current = self
+            .journal()?
+            .ok_or_else(|| self.journal_error("the USN journal was deleted"))?;
+        if current.id != saved.id {
+            return Err(self.journal_error("the USN journal was recreated"));
+        }
+        if saved.next_usn < current.first_usn {
+            return Err(self.journal_error(OVERWRITTEN));
+        }
+
+        // Record number -> file reference of entries whose size and date must be read.
+        let mut refresh = HashMap::new();
+        let mut name = String::new();
+        let mut count = 0;
+        let mut input = READ_USN_JOURNAL_DATA_V0 {
+            StartUsn: saved.next_usn,
+            ReasonMask: u32::MAX,
+            ReturnOnlyOnClose: 0,
+            Timeout: 0,
+            BytesToWaitFor: 0,
+            UsnJournalID: saved.id,
+        };
+        let mut buf = vec![0u8; 64 << 10];
+        loop {
+            let len = match self.volume.ioctl(FSCTL_READ_USN_JOURNAL, &input, &mut buf) {
+                Ok(len) => len,
+                Err(e) if e.code() == ERROR_JOURNAL_ENTRY_DELETED.to_hresult() => {
+                    return Err(self.journal_error(OVERWRITTEN));
+                }
+                Err(source) => return Err(self.error("reading the USN journal", source)),
+            };
+            let (next, changes) = parse::usn_changes(&buf[..len])
+                .ok_or_else(|| self.journal_error("unexpected USN journal output"))?;
+            for change in changes {
+                count += 1;
+                self.apply_change(index, state, &change, &mut name, &mut refresh)?;
+            }
+            if next == input.StartUsn {
+                break;
+            }
+            input.StartUsn = next;
+        }
+
+        for (record, file_reference) in refresh {
+            // A file deleted after its last journal entry fails to open. Its
+            // deletion arrives with the next update.
+            if let Some(id) = state.id(record)
+                && let Ok((size, filetime)) = self.volume.file_info(file_reference)
+            {
+                index.set_size(id, size);
+                index.set_modified(id, parse::unix_from_filetime(filetime as u64));
+            }
+        }
+        state.journal = Some(Journal {
+            id: saved.id,
+            next_usn: input.StartUsn,
+        });
+        Ok(count)
+    }
+
+    /// Applies one journal entry in journal order. Name, parent and attributes
+    /// come from the entry itself. Raw $MFT reads may still see the record as it
+    /// was before the change, because NTFS writes metadata back lazily.
+    fn apply_change(
+        &self,
+        index: &mut Index,
+        state: &mut VolumeState,
+        change: &UsnChange<'_>,
+        name: &mut String,
+        refresh: &mut HashMap<u64, u64>,
+    ) -> Result<(), NtfsError> {
+        let record = change.record as usize;
+        if record < FIRST_USER_RECORD || change.reason & USN_REASON_RENAME_OLD_NAME != 0 {
+            return Ok(());
+        }
+        let parent = state
+            .id(change.parent)
+            .filter(|&parent| !index.is_removed(parent));
+        let (false, Some(parent)) = (change.reason & USN_REASON_FILE_DELETE != 0, parent) else {
+            state.forget(index, record);
+            refresh.remove(&change.record);
+            return Ok(());
+        };
+        decode_name(change.name, name);
+        let existing = state.id(change.record);
+        // The same rule as in `read`: new root children must be listed in the root.
+        if parent == state.root
+            && existing.is_none()
+            && fs::symlink_metadata(format!(r"{}:\{name}", self.drive)).is_err()
+        {
+            return Ok(());
+        }
+        let id = match existing {
+            Some(id) => {
+                if index.name(id) != name.as_str() {
+                    index.set_name(id, name)?;
+                }
+                index.set_parent(id, Some(parent));
+                id
+            }
+            None => {
+                let id = index.push(name, Some(parent), 0, 0, 0)?;
+                if record >= state.ids.len() {
+                    state.ids.resize(record + 1, NO_ID);
+                }
+                state.ids[record] = id;
+                id
+            }
+        };
+        index.set_attributes(id, change.attributes);
+        refresh.insert(change.record, change.file_reference);
+        Ok(())
+    }
+
+    fn serial(&self) -> Result<u64, NtfsError> {
+        Ok(self.layout()?.serial)
+    }
+
+    fn layout(&self) -> Result<Layout, NtfsError> {
+        let mut data = [0u8; 128];
+        let len = self
+            .volume
+            .ioctl(FSCTL_GET_NTFS_VOLUME_DATA, &(), &mut data)
+            .map_err(|source| self.error("reading the volume layout", source))?;
+        let layout =
+            parse::layout(&data[..len]).ok_or_else(|| self.mft_error("volume data too short"))?;
+        // Whole records per cluster keep every read aligned to record boundaries.
+        if layout.record == 0 || layout.cluster % layout.record as u64 != 0 {
+            return Err(self.mft_error("clusters are smaller than file records"));
+        }
+        Ok(layout)
+    }
+
+    /// Volume byte ranges of the $MFT. `buf` must hold at least one cluster.
+    fn mft_extents(&self, layout: &Layout, buf: &mut [u8]) -> Result<Vec<Range<u64>>, NtfsError> {
+        let cluster = &mut buf[..layout.cluster as usize];
+        self.read_at(layout.mft_offset, cluster)?;
+        parse::mft_extents(&mut cluster[..layout.record], layout.cluster)
+            .ok_or_else(|| self.mft_error("record 0 has no readable $DATA runs"))
+    }
+
+    fn journal(&self) -> Result<Option<JournalData>, NtfsError> {
+        let mut data = [0u8; 80];
+        match self.volume.ioctl(FSCTL_QUERY_USN_JOURNAL, &(), &mut data) {
+            Ok(len) => parse::journal_data(&data[..len])
+                .map(Some)
+                .ok_or_else(|| self.journal_error("unexpected USN journal data")),
+            Err(e)
+                if e.code() == ERROR_JOURNAL_NOT_ACTIVE.to_hresult()
+                    || e.code() == ERROR_JOURNAL_DELETE_IN_PROGRESS.to_hresult() =>
+            {
+                Ok(None)
+            }
+            Err(source) => Err(self.error("querying the USN journal", source)),
+        }
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, NtfsError> {
@@ -216,16 +396,52 @@ impl NtfsVolume {
             reason,
         }
     }
+
+    fn journal_error(&self, reason: &'static str) -> NtfsError {
+        NtfsError::Journal {
+            drive: self.drive,
+            reason,
+        }
+    }
 }
 
-/// Sets the parent of every entry pushed after `root` and removes entries whose
-/// parent chain does not reach `root`: NTFS metadata below $Extend, records
-/// orphaned while the volume was in use, cycles in damaged records, and root
-/// children absent from `root_listing`.
+fn decode_name(utf16: &[u8], out: &mut String) {
+    out.clear();
+    out.extend(
+        char::decode_utf16(
+            utf16
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+        )
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
+    );
+}
+
+/// Attributes only come from base records, which hold `$STANDARD_INFORMATION`.
+fn apply_metadata(index: &mut Index, id: u32, file: &FileRecord<'_>) {
+    if file.base.is_none() {
+        let directory = if file.directory {
+            ATTRIBUTE_DIRECTORY
+        } else {
+            0
+        };
+        index.set_attributes(id, file.attributes.unwrap_or(0) | directory);
+    }
+    if let Some(size) = file.size {
+        index.set_size(id, size);
+    }
+    if let Some(modified) = file.modified {
+        index.set_modified(id, modified);
+    }
+}
+
+/// Sets the parent of every entry pushed after the volume root and removes
+/// entries whose parent chain does not reach it: NTFS metadata below $Extend,
+/// records orphaned while the volume was in use, cycles in damaged records,
+/// and root children absent from `root_listing`.
 fn link_parents(
     index: &mut Index,
-    records: &Records,
-    root: u32,
+    state: &VolumeState,
     parents: &[(u32, u64)],
     root_listing: Option<&HashSet<String>>,
 ) {
@@ -236,22 +452,23 @@ fn link_parents(
         Reachable,
         Unreachable,
     }
+    let root = state.root;
     let first = root as usize;
     let mut parent_of = vec![NO_ID; index.len() - first];
     for &(id, parent) in parents {
-        parent_of[id as usize - first] = records.get(parent).unwrap_or(NO_ID);
+        parent_of[id as usize - first] = state.id(parent).unwrap_or(NO_ID);
     }
-    let mut state = vec![State::Unknown; parent_of.len()];
-    state[0] = State::Reachable;
+    let mut states = vec![State::Unknown; parent_of.len()];
+    states[0] = State::Reachable;
     let mut chain = Vec::new();
-    for start in 0..state.len() {
+    for start in 0..states.len() {
         let mut at = start;
         let reachable = loop {
-            match state[at] {
+            match states[at] {
                 State::Reachable => break true,
                 State::Unreachable | State::Visiting => break false,
                 State::Unknown => {
-                    state[at] = State::Visiting;
+                    states[at] = State::Visiting;
                     chain.push(at);
                     match parent_of[at] {
                         NO_ID => break false,
@@ -274,12 +491,12 @@ fn link_parents(
             State::Unreachable
         };
         for at in chain.drain(..) {
-            state[at] = verdict;
+            states[at] = verdict;
         }
     }
-    for (offset, (&parent, &state)) in parent_of.iter().zip(&state).enumerate().skip(1) {
+    for (offset, (&parent, &verdict)) in parent_of.iter().zip(&states).enumerate().skip(1) {
         let id = (first + offset) as u32;
-        if state == State::Reachable {
+        if verdict == State::Reachable {
             index.set_parent(id, Some(parent));
         } else {
             index.remove(id);

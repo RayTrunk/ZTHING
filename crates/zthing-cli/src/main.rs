@@ -2,13 +2,14 @@
 //! holds the index, zt reads the volumes itself and needs administrator rights.
 
 use std::io::{self, BufWriter, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use zthing_core::{Index, Now, Query, SortKey};
-use zthing_ntfs::NtfsVolume;
+use zthing_ntfs::Indexer;
 
 const USAGE: &str = "usage: zt [--json] [--count] [--limit N] [--sort name|path|size|dm] <query>";
 
@@ -43,23 +44,34 @@ fn run() -> Result<bool> {
     };
     let query = Query::parse(&options.query, now)?;
 
-    let mut index = Index::new();
-    let mut indexed = 0;
-    for drive in zthing_ntfs::fixed_drives() {
-        let result = NtfsVolume::open(drive).and_then(|volume| volume.read(&mut index));
-        match result {
-            Ok(_) => indexed += 1,
-            Err(e) => eprintln!("zt: skipped {e}"),
-        }
+    let path = std::env::var_os("LOCALAPPDATA")
+        .map(|dir| PathBuf::from(dir).join(r"ZTHING\index.bin"))
+        .context("LOCALAPPDATA is not set")?;
+    let (mut indexer, report) = Indexer::open(&path, &zthing_ntfs::fixed_drives())?;
+    for e in &report.skipped {
+        eprintln!("zt: skipped {e}");
     }
-    if indexed == 0 {
+    if let Some(reason) = &report.rebuilt {
+        eprintln!("zt: read all volumes again: {reason}");
+    }
+    if indexer.index().is_empty() {
         bail!("no volume could be indexed, run zt from a terminal with administrator rights");
     }
-    index.shrink_to_fit();
+    let found = print_hits(indexer.index(), &query, &options)?;
+    // Saved after printing, so the results appear without waiting for the write.
+    if indexer.needs_save() {
+        indexer
+            .save(&path)
+            .with_context(|| format!("saving {}", path.display()))?;
+    }
+    Ok(found)
+}
 
+/// Returns whether anything matched.
+fn print_hits(index: &Index, query: &Query, options: &Options) -> Result<bool> {
     // `None` only signals cancellation, which this flag never requests.
     let mut hits = index
-        .search(&query, None, &AtomicBool::new(false))
+        .search(query, None, &AtomicBool::new(false))
         .unwrap_or_default();
     if options.count {
         println!("{}", hits.len());

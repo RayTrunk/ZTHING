@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +32,42 @@ pub enum SortKey {
 pub enum IndexError {
     #[error("index full: {entries} entries and {name_bytes} name bytes exceed 32-bit addressing")]
     Full { entries: usize, name_bytes: usize },
+}
+
+const FORMAT_MAGIC: &[u8; 8] = b"ZTHINGIX";
+/// Raised whenever the layout written by [`Index::save`] changes.
+pub const FORMAT_VERSION: u32 = 1;
+const ENTRY_BYTES: usize = 32;
+/// Entries parsed per read while loading.
+const LOAD_CHUNK: usize = 4096;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error("reading the index: {0}")]
+    Io(#[from] io::Error),
+    #[error("index file has format version {found}, this build reads version {FORMAT_VERSION}")]
+    Version { found: u32 },
+    #[error("index file is damaged: {0}")]
+    Damaged(&'static str),
+}
+
+fn read_array<const N: usize>(input: &mut impl Read) -> io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    input.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Room for about 6 % more names and entries. Without it the first live update
+/// after a load doubles every buffer, which briefly needs three times their size.
+fn with_headroom(len: usize) -> usize {
+    len + len / 16
+}
+
+fn fill(input: &mut impl Read, buf: &mut [u8]) -> Result<(), LoadError> {
+    input.read_exact(buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => LoadError::Damaged("file is truncated"),
+        _ => LoadError::Io(e),
+    })
 }
 
 #[derive(Debug)]
@@ -78,25 +115,143 @@ impl Index {
         size: u64,
         modified: i64,
     ) -> Result<u32, IndexError> {
-        let name_end = self.names.len() + name.len();
-        if self.entries.len() >= REMOVED as usize || name_end > u32::MAX as usize {
-            return Err(IndexError::Full {
-                entries: self.entries.len(),
-                name_bytes: name_end,
-            });
+        if self.entries.len() >= REMOVED as usize {
+            return Err(self.full(name));
         }
+        let name_offset = self.append_name(name)?;
         self.entries.push(Entry {
-            name_offset: self.names.len() as u32,
+            name_offset,
             name_len: name.len() as u32,
             parent: parent.unwrap_or(NO_PARENT),
             attributes,
             size,
             modified,
         });
+        Ok(self.entries.len() as u32 - 1)
+    }
+
+    /// The old name stays in the buffers as garbage until the index is rebuilt.
+    pub fn set_name(&mut self, id: u32, name: &str) -> Result<(), IndexError> {
+        let name_offset = self.append_name(name)?;
+        let entry = &mut self.entries[id as usize];
+        entry.name_offset = name_offset;
+        entry.name_len = name.len() as u32;
+        Ok(())
+    }
+
+    fn append_name(&mut self, name: &str) -> Result<u32, IndexError> {
+        if self.names.len() + name.len() > u32::MAX as usize {
+            return Err(self.full(name));
+        }
+        let offset = self.names.len() as u32;
         self.names.push_str(name);
         fold_case_into(&mut self.names_folded, name);
         self.folder_paths.take();
-        Ok(self.entries.len() as u32 - 1)
+        Ok(offset)
+    }
+
+    fn full(&self, name: &str) -> IndexError {
+        IndexError::Full {
+            entries: self.entries.len(),
+            name_bytes: self.names.len() + name.len(),
+        }
+    }
+
+    pub fn removed_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.parent == REMOVED).count()
+    }
+
+    /// Writes the format that [`Index::load`] reads. The folded names are
+    /// rebuilt on load, which keeps the file a third smaller.
+    pub fn save(&self, out: &mut impl Write) -> io::Result<()> {
+        out.write_all(FORMAT_MAGIC)?;
+        out.write_all(&FORMAT_VERSION.to_le_bytes())?;
+        out.write_all(&(self.entries.len() as u64).to_le_bytes())?;
+        out.write_all(&(self.names.len() as u64).to_le_bytes())?;
+        out.write_all(self.names.as_bytes())?;
+        for entry in &self.entries {
+            let mut bytes = [0u8; ENTRY_BYTES];
+            bytes[0..4].copy_from_slice(&entry.name_offset.to_le_bytes());
+            bytes[4..8].copy_from_slice(&entry.name_len.to_le_bytes());
+            bytes[8..12].copy_from_slice(&entry.parent.to_le_bytes());
+            bytes[12..16].copy_from_slice(&entry.attributes.to_le_bytes());
+            bytes[16..24].copy_from_slice(&entry.size.to_le_bytes());
+            bytes[24..32].copy_from_slice(&entry.modified.to_le_bytes());
+            out.write_all(&bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Reads what [`Index::save`] wrote. Every offset and parent is checked, so
+    /// a damaged file yields an error instead of a later panic.
+    pub fn load(input: &mut impl Read) -> Result<Self, LoadError> {
+        if &read_array::<8>(input)? != FORMAT_MAGIC {
+            return Err(LoadError::Damaged("not a ZTHING index"));
+        }
+        let version = u32::from_le_bytes(read_array(input)?);
+        if version != FORMAT_VERSION {
+            return Err(LoadError::Version { found: version });
+        }
+        let too_large = |_| LoadError::Damaged("length too large");
+        let count = usize::try_from(u64::from_le_bytes(read_array(input)?)).map_err(too_large)?;
+        let names_len =
+            usize::try_from(u64::from_le_bytes(read_array(input)?)).map_err(too_large)?;
+        // Exact reservations keep the peak memory at the final size. A damaged
+        // length makes them fail with an error instead of aborting the process.
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(with_headroom(names_len))
+            .map_err(|_| LoadError::Damaged("length too large"))?;
+        names.resize(names_len, 0);
+        fill(input, &mut names)?;
+        let names =
+            String::from_utf8(names).map_err(|_| LoadError::Damaged("names are not UTF-8"))?;
+
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(with_headroom(count))
+            .map_err(|_| LoadError::Damaged("length too large"))?;
+        let mut chunk = vec![0u8; ENTRY_BYTES * LOAD_CHUNK];
+        while entries.len() < count {
+            let len = (count - entries.len()).min(LOAD_CHUNK) * ENTRY_BYTES;
+            fill(input, &mut chunk[..len])?;
+            for bytes in chunk[..len].chunks_exact(ENTRY_BYTES) {
+                let u32_at = |at: usize| {
+                    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                };
+                let u64_at = |at: usize| {
+                    let mut field = [0u8; 8];
+                    field.copy_from_slice(&bytes[at..at + 8]);
+                    field
+                };
+                let entry = Entry {
+                    name_offset: u32_at(0),
+                    name_len: u32_at(4),
+                    parent: u32_at(8),
+                    attributes: u32_at(12),
+                    size: u64::from_le_bytes(u64_at(16)),
+                    modified: i64::from_le_bytes(u64_at(24)),
+                };
+                let start = entry.name_offset as usize;
+                if !names.is_char_boundary(start)
+                    || !names.is_char_boundary(start + entry.name_len as usize)
+                {
+                    return Err(LoadError::Damaged("name outside the name buffer"));
+                }
+                if entry.parent as usize >= count && entry.parent < REMOVED {
+                    return Err(LoadError::Damaged("parent outside the index"));
+                }
+                entries.push(entry);
+            }
+        }
+        let mut names_folded = String::with_capacity(with_headroom(names.len()));
+        fold_case_into(&mut names_folded, &names);
+        Ok(Self {
+            names,
+            names_folded,
+            entries,
+            folder_paths: OnceLock::new(),
+        })
     }
 
     pub fn set_parent(&mut self, id: u32, parent: Option<u32>) {
@@ -175,11 +330,13 @@ impl Index {
         self.entries[id as usize].modified
     }
 
-    /// Releases the spare capacity that growing the buffers left behind.
+    /// Releases the spare capacity that growing the buffers left behind, except
+    /// for the headroom that live updates need.
     pub fn shrink_to_fit(&mut self) {
-        self.names.shrink_to_fit();
-        self.names_folded.shrink_to_fit();
-        self.entries.shrink_to_fit();
+        self.names.shrink_to(with_headroom(self.names.len()));
+        self.names_folded
+            .shrink_to(with_headroom(self.names_folded.len()));
+        self.entries.shrink_to(with_headroom(self.entries.len()));
     }
 
     pub fn heap_size(&self) -> usize {

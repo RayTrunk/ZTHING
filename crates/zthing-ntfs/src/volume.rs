@@ -3,8 +3,11 @@
 
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW,
-    GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING, ReadFile,
+    CreateFileW, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileBasicInfo, FileIdType,
+    FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
+    GetVolumeInformationW, OPEN_EXISTING, OpenFileById, ReadFile,
 };
 use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use windows::core::{HSTRING, Result};
@@ -99,6 +102,54 @@ impl Volume {
             )
         }?;
         Ok(read as usize)
+    }
+}
+
+impl Volume {
+    /// Size and last write time (FILETIME) of a file on this volume, read through
+    /// the file system and therefore never older than its cached metadata.
+    pub fn file_info(&self, file_reference: u64) -> Result<(u64, i64)> {
+        let id = FILE_ID_DESCRIPTOR {
+            dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: FileIdType,
+            Anonymous: FILE_ID_DESCRIPTOR_0 {
+                FileId: file_reference as i64,
+            },
+        };
+        // SAFETY: `id` outlives the call. The returned handle is closed below.
+        let file = unsafe {
+            OpenFileById(
+                self.handle,
+                &id,
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                FILE_FLAG_BACKUP_SEMANTICS,
+            )
+        }?;
+        let mut basic = FILE_BASIC_INFO::default();
+        let mut standard = FILE_STANDARD_INFO::default();
+        // SAFETY: each buffer has exactly the size of its information class.
+        let result = unsafe {
+            GetFileInformationByHandleEx(
+                file,
+                FileBasicInfo,
+                std::ptr::from_mut(&mut basic).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+            .and_then(|()| {
+                GetFileInformationByHandleEx(
+                    file,
+                    FileStandardInfo,
+                    std::ptr::from_mut(&mut standard).cast(),
+                    size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            })
+        };
+        // SAFETY: the handle came from OpenFileById and is closed exactly once.
+        let _ = unsafe { CloseHandle(file) };
+        result?;
+        Ok((standard.EndOfFile as u64, basic.LastWriteTime))
     }
 }
 

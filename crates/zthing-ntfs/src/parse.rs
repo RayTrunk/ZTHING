@@ -36,6 +36,7 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
 }
 
 pub(crate) struct Layout {
+    pub serial: u64,
     pub cluster: u64,
     pub record: usize,
     pub mft_offset: u64,
@@ -46,11 +47,65 @@ pub(crate) struct Layout {
 pub(crate) fn layout(data: &[u8]) -> Option<Layout> {
     let cluster = u64::from(u32_at(data, 44)?);
     Some(Layout {
+        serial: u64_at(data, 0)?,
         cluster,
         record: u32_at(data, 48)? as usize,
         mft_len: u64_at(data, 56)?,
         mft_offset: u64_at(data, 64)?.checked_mul(cluster)?,
     })
+}
+
+pub(crate) struct JournalData {
+    pub id: u64,
+    pub first_usn: i64,
+    pub next_usn: i64,
+}
+
+/// Reads `USN_JOURNAL_DATA_V0` from `FSCTL_QUERY_USN_JOURNAL`.
+pub(crate) fn journal_data(data: &[u8]) -> Option<JournalData> {
+    Some(JournalData {
+        id: u64_at(data, 0)?,
+        first_usn: u64_at(data, 8)? as i64,
+        next_usn: u64_at(data, 16)? as i64,
+    })
+}
+
+pub(crate) struct UsnChange<'a> {
+    /// Full file reference including the sequence number, as `OpenFileById` needs it.
+    pub file_reference: u64,
+    pub record: u64,
+    pub parent: u64,
+    pub reason: u32,
+    pub attributes: u32,
+    /// UTF-16LE.
+    pub name: &'a [u8],
+}
+
+/// The next USN to read and the `USN_RECORD_V2` entries of `FSCTL_READ_USN_JOURNAL` output.
+pub(crate) fn usn_changes(buf: &[u8]) -> Option<(i64, impl Iterator<Item = UsnChange<'_>>)> {
+    let next = u64_at(buf, 0)? as i64;
+    let mut at = 8;
+    let changes = std::iter::from_fn(move || {
+        let len = u32_at(buf, at)? as usize;
+        let record = buf.get(at..at.checked_add(len)?)?;
+        at += len;
+        let file_reference = u64_at(record, 8)?;
+        let name_len = usize::from(u16_at(record, 56)?);
+        let name_offset = usize::from(u16_at(record, 58)?);
+        Some(UsnChange {
+            file_reference,
+            record: file_reference & RECORD_MASK,
+            parent: u64_at(record, 16)? & RECORD_MASK,
+            reason: u32_at(record, 40)?,
+            attributes: u32_at(record, 52)?,
+            name: record.get(name_offset..name_offset + name_len)?,
+        })
+    });
+    Some((next, changes))
+}
+
+pub(crate) fn unix_from_filetime(filetime: u64) -> i64 {
+    (filetime / FILETIME_TICKS_PER_SECOND) as i64 - FILETIME_TO_UNIX_SECONDS
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -93,8 +148,7 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
             ATTR_STANDARD_INFORMATION if !non_resident => {
                 let content = usize::from(u16_at(attr, 20)?);
                 let filetime = u64_at(attr, content + 8)?;
-                file.modified =
-                    Some((filetime / FILETIME_TICKS_PER_SECOND) as i64 - FILETIME_TO_UNIX_SECONDS);
+                file.modified = Some(unix_from_filetime(filetime));
                 file.attributes = Some(u32_at(attr, content + 32)?);
             }
             ATTR_FILE_NAME if !non_resident && file.name.is_none() => {
@@ -349,6 +403,37 @@ mod tests {
 
         let mut garbage = vec![0xEE; 1024];
         assert_eq!(file_record(&mut garbage), None);
+    }
+
+    #[test]
+    fn usn_changes_follow_the_next_usn() {
+        let name = utf16("Ä.txt");
+        let mut buf = 4711u64.to_le_bytes().to_vec();
+        for (frn, reason) in [
+            (0x0002_0000_0000_0030u64, 0x100u32),
+            (0x0001_0000_0000_0031, 0x200),
+        ] {
+            let mut rec = vec![0u8; (60 + name.len()).next_multiple_of(8)];
+            let len = rec.len() as u32;
+            put(&mut rec, 0, &len.to_le_bytes());
+            put(&mut rec, 8, &frn.to_le_bytes());
+            put(&mut rec, 16, &0x0005_0000_0000_0005u64.to_le_bytes());
+            put(&mut rec, 40, &reason.to_le_bytes());
+            put(&mut rec, 52, &0x20u32.to_le_bytes());
+            put(&mut rec, 56, &(name.len() as u16).to_le_bytes());
+            put(&mut rec, 58, &60u16.to_le_bytes());
+            put(&mut rec, 60, &name);
+            buf.extend_from_slice(&rec);
+        }
+        let (next, changes) = usn_changes(&buf).unwrap();
+        let changes: Vec<_> = changes.collect();
+        assert_eq!(next, 4711);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].file_reference, 0x0002_0000_0000_0030);
+        assert_eq!((changes[0].record, changes[0].parent), (0x30, 5));
+        assert_eq!((changes[0].reason, changes[1].reason), (0x100, 0x200));
+        assert_eq!(changes[0].attributes, 0x20);
+        assert_eq!(changes[0].name, name.as_slice());
     }
 
     #[test]
