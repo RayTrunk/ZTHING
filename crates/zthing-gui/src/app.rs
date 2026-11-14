@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -14,14 +14,18 @@ use chrono::{Local, TimeZone};
 use eframe::egui::{self, Key, Sense, ViewportCommand};
 use egui_extras::{Column, TableBuilder};
 use global_hotkey::GlobalHotKeyManager;
+use global_hotkey::hotkey::HotKey;
 use tray_icon::TrayIcon;
 use winsafe::prelude::*;
 use winsafe::{HWND, co};
 use zthing_client::{Client, ClientError, Hit, Page, Search, Sort, Status};
 
+use crate::config::Config;
 use crate::preview::{Content, Preview};
+use crate::settings::{Outcome, Settings};
 use crate::shell;
 use crate::text::Texts;
+use crate::theme;
 
 /// How often the client thread asks for the status, which tells when the index changed.
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
@@ -317,8 +321,12 @@ impl PreviewPane {
 pub struct App {
     shared: Arc<Shared>,
     texts: &'static Texts,
-    /// Drive and exclusion terms in front of every query.
-    prefix: String,
+    config: Config,
+    config_path: PathBuf,
+    /// Open while the settings window shows.
+    settings: Option<Settings>,
+    show_info: bool,
+    logo: Option<egui::TextureHandle>,
     input: String,
     sort: Sort,
     descending: bool,
@@ -333,7 +341,7 @@ pub struct App {
     sent: Option<(String, Sort, bool, Option<u64>)>,
     preview: PreviewPane,
     _tray: Option<TrayIcon>,
-    _hotkeys: Option<GlobalHotKeyManager>,
+    hotkeys: Option<GlobalHotKeyManager>,
 }
 
 impl App {
@@ -341,7 +349,8 @@ impl App {
     pub fn new(
         shared: Arc<Shared>,
         texts: &'static Texts,
-        prefix: String,
+        config: Config,
+        config_path: PathBuf,
         jobs: Sender<Job>,
         replies: Receiver<Reply>,
         preview: PreviewPane,
@@ -351,7 +360,11 @@ impl App {
         Self {
             shared,
             texts,
-            prefix,
+            config,
+            config_path,
+            settings: None,
+            show_info: false,
+            logo: None,
             input: String::new(),
             sort: Sort::Name,
             descending: false,
@@ -364,7 +377,7 @@ impl App {
             sent: None,
             preview,
             _tray: tray,
-            _hotkeys: hotkeys,
+            hotkeys,
         }
     }
 
@@ -373,7 +386,7 @@ impl App {
         let _ = self.jobs.send(Job {
             generation,
             search: Search {
-                query: format!("{}{}", self.prefix, self.input),
+                query: format!("{}{}", self.config.query_prefix(), self.input),
                 sort: self.sort,
                 descending: self.descending,
                 offset: page * PAGE,
@@ -477,6 +490,141 @@ impl App {
         }
     }
 
+    /// Applies a saved settings window and writes config.toml. HTTP changes
+    /// wait for the next start, because the server thread cannot be stopped.
+    fn apply(&mut self, ctx: &egui::Context, config: Config) {
+        theme::apply(ctx, config.theme);
+        if config.preview != self.config.preview {
+            self.preview.on = config.preview;
+        }
+        if config.hotkey != self.config.hotkey
+            && let Some(manager) = &self.hotkeys
+        {
+            if let Ok(old) = self.config.hotkey.parse::<HotKey>() {
+                // It may never have been registered, for example when another program holds it.
+                let _ = manager.unregister(old);
+            }
+            let registered = config
+                .hotkey
+                .parse::<HotKey>()
+                .map_err(|e| e.to_string())
+                .and_then(|hotkey| manager.register(hotkey).map_err(|e| e.to_string()));
+            let mut notes = lock(&self.shared.notes);
+            notes.retain(|note| !note.starts_with(self.texts.hotkey_failed));
+            if let Err(e) = registered {
+                notes.push(format!(
+                    "{} {}: {e}",
+                    self.texts.hotkey_failed, config.hotkey
+                ));
+            }
+        }
+        if config.drives != self.config.drives || config.exclude != self.config.exclude {
+            // Searches again with the new query prefix.
+            self.sent = None;
+        }
+        if let Err(e) = config.save(&self.config_path) {
+            self.shared
+                .note(format!("{}: {e}", self.config_path.display()));
+        }
+        self.config = config;
+    }
+
+    fn info_ui(&mut self, ctx: &egui::Context) {
+        let texts = self.texts;
+        let logo = self
+            .logo
+            .get_or_insert_with(|| {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [crate::WINDOW_ICON_SIZE as usize; 2],
+                    crate::WINDOW_ICON,
+                );
+                ctx.load_texture("logo", image, egui::TextureOptions::LINEAR)
+            })
+            .clone();
+        let service = match &*lock(&self.shared.service) {
+            Service::Online(status) => {
+                let drives: Vec<String> = status
+                    .volumes
+                    .iter()
+                    .map(|volume| {
+                        let live = if volume.live { "" } else { " *" };
+                        format!("{}:{live}", volume.drive)
+                    })
+                    .collect();
+                format!(
+                    "{} {}, {} {}",
+                    status.entries,
+                    texts.entries,
+                    texts.drives,
+                    drives.join(" ")
+                )
+            }
+            Service::Offline(error) => format!("{}: {error}", texts.no_service),
+            Service::Connecting => texts.indexing.to_owned(),
+        };
+        let mut open = true;
+        let mut open_folder = false;
+        egui::Window::new(texts.info)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(64.0, 64.0)));
+                    ui.vertical(|ui| {
+                        ui.heading("ZTHING");
+                        ui.label(format!("{} {}", texts.version, env!("CARGO_PKG_VERSION")));
+                        ui.label(texts.about);
+                    });
+                });
+                ui.separator();
+                egui::Grid::new("info")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(texts.service);
+                        ui.label(service);
+                        ui.end_row();
+                        ui.label(texts.license);
+                        ui.label("MIT OR Apache-2.0");
+                        ui.end_row();
+                        ui.label(texts.settings);
+                        ui.horizontal(|ui| {
+                            ui.label(self.config_path.display().to_string());
+                            open_folder = ui.small_button(texts.open_folder).clicked();
+                        });
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.strong(texts.shortcuts);
+                egui::Grid::new("shortcuts")
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (keys, what) in [
+                            (self.config.hotkey.as_str(), texts.show),
+                            ("↑ ↓", texts.selection),
+                            ("Enter", texts.open),
+                            ("Ctrl+Enter", texts.open_folder),
+                            ("Ctrl+Shift+C", texts.copy_path),
+                            ("F3", texts.preview),
+                        ] {
+                            ui.monospace(keys);
+                            ui.label(what);
+                            ui.end_row();
+                        }
+                    });
+            });
+        if open_folder {
+            self.run(
+                ctx,
+                Action::OpenFolder(self.config_path.display().to_string()),
+            );
+        }
+        self.show_info &= open;
+    }
+
     fn run(&self, ctx: &egui::Context, action: Action) {
         let (program, started) = match action {
             Action::CopyPath(text) | Action::CopyName(text) => {
@@ -562,11 +710,15 @@ impl eframe::App for App {
         };
         self.search(index_version);
         self.receive();
-        let mut action = self.keyboard(ctx);
-        let texts = self.texts;
-        if ctx.input(|i| i.key_pressed(Key::F3)) {
-            self.preview.on = !self.preview.on;
+        // Keys belong to the settings window while it is open.
+        let mut action = None;
+        if self.settings.is_none() {
+            action = self.keyboard(ctx);
+            if ctx.input(|i| i.key_pressed(Key::F3)) {
+                self.preview.on = !self.preview.on;
+            }
         }
+        let texts = self.texts;
         let selected_hit = self.selected.and_then(|row| self.shown.hit(row)).cloned();
         if self.preview.on {
             self.preview.update(
@@ -575,18 +727,51 @@ impl eframe::App for App {
             );
         }
 
+        let mut open_settings = false;
         egui::TopBottomPanel::top("search").show(ctx, |ui| {
             ui.add_space(4.0);
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.input)
-                    .hint_text(texts.search_hint)
-                    .desired_width(f32::INFINITY),
+            // A right-to-left layout fills the panel's height; a fixed row height keeps it one line.
+            let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(
+                row,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui.button("ℹ").on_hover_text(texts.info).clicked() {
+                        self.show_info = !self.show_info;
+                    }
+                    open_settings = ui.button("⚙").on_hover_text(texts.settings).clicked();
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.input)
+                            .hint_text(texts.search_hint)
+                            .desired_width(ui.available_width()),
+                    );
+                    let wanted = self.shared.focus_search.swap(false, Ordering::Relaxed);
+                    if wanted || (self.settings.is_none() && !response.has_focus()) {
+                        response.request_focus();
+                    }
+                },
             );
-            if self.shared.focus_search.swap(false, Ordering::Relaxed) || !response.has_focus() {
-                response.request_focus();
-            }
             ui.add_space(4.0);
         });
+        if open_settings && self.settings.is_none() {
+            self.settings = Some(Settings::new(&self.config));
+        }
+        if let Some(settings) = &mut self.settings {
+            match settings.ui(ctx, texts) {
+                Outcome::Open => {}
+                Outcome::Save(config) => {
+                    self.settings = None;
+                    self.apply(ctx, config);
+                }
+                Outcome::Cancel => {
+                    self.settings = None;
+                    theme::apply(ctx, self.config.theme);
+                }
+            }
+        }
+        if self.show_info {
+            self.info_ui(ctx);
+        }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -623,6 +808,9 @@ impl eframe::App for App {
         let mut missing = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
             let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+            // Selectable labels take the clicks over their text, which left only
+            // the strip below the text to select a row with.
+            ui.style_mut().interaction.selectable_labels = false;
             let mut table = TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)

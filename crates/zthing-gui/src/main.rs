@@ -17,15 +17,9 @@ use winsafe::prelude::*;
 use winsafe::{HEVENT, co};
 
 use zthing_gui::app::{self, App, PreviewPane, Shared};
-use zthing_gui::config::{self, Theme};
+use zthing_gui::config;
 use zthing_gui::text::{self, Texts};
-use zthing_gui::{http, preview};
-
-/// Rendered from `assets/` by build.rs, the sizes must match the ones there.
-const WINDOW_ICON_SIZE: u32 = 256;
-const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window_icon.rgba"));
-const TRAY_ICON_SIZE: u32 = 32;
-const TRAY_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon.rgba"));
+use zthing_gui::{TRAY_ICON, TRAY_ICON_SIZE, WINDOW_ICON, WINDOW_ICON_SIZE, http, preview, theme};
 /// Signals the running window that a second start handed over a query.
 /// `Local\` gives every logon session its own window.
 const OPEN_EVENT: &str = r"Local\ZTHING-open";
@@ -58,28 +52,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (config, config_problem) =
-        config::load(&PathBuf::from(app_data).join(r"ZTHING\config.toml"));
-    // The service indexes every drive, so the chosen drives and excluded
-    // folders become terms in front of each query. The trailing backslash
-    // hides a folder's contents but not folders that merely start with the same name.
-    let drives = config
-        .drives
-        .iter()
-        .filter_map(|drive| drive.chars().next())
-        .map(|drive| format!("path:\"{}:\\\"", drive.to_ascii_uppercase()))
-        .collect::<Vec<_>>()
-        .join("|");
-    let exclusions: String = config
-        .exclude
-        .iter()
-        .map(|folder| format!("!path:\"{}\\\" ", folder.trim_end_matches('\\')))
-        .collect();
-    let prefix = if drives.is_empty() {
-        exclusions
-    } else {
-        format!("{drives} {exclusions}")
-    };
+    let config_path = PathBuf::from(app_data).join(r"ZTHING\config.toml");
+    let (config, config_problem) = config::load(&config_path);
     let mut notes: Vec<String> = config_problem.into_iter().collect();
     if config.http.enabled
         && let Err(e) = http::spawn(config.http.port, config.http.token.clone())
@@ -108,11 +82,7 @@ fn main() -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            ctx.set_theme(match config.theme {
-                Theme::System => egui::ThemePreference::System,
-                Theme::Light => egui::ThemePreference::Light,
-                Theme::Dark => egui::ThemePreference::Dark,
-            });
+            theme::apply(&ctx, config.theme);
             let (jobs, received_jobs) = mpsc::channel();
             let (replies, received_replies) = mpsc::channel();
             app::spawn_client(shared.clone(), ctx.clone(), received_jobs, replies);
@@ -133,16 +103,27 @@ fn main() -> anyhow::Result<()> {
                     open_ctx.request_repaint();
                 }
             });
-            let hotkeys = register_hotkey(&config.hotkey, &shared, &ctx)
-                .map_err(|e| shared.note(format!("{} {}: {e}", texts.hotkey_failed, config.hotkey)))
+            let hotkeys = hotkey_manager(&shared, &ctx)
+                .map_err(|e| shared.note(format!("{}: {e}", texts.hotkey_failed)))
                 .ok();
+            if let Some(manager) = &hotkeys {
+                let registered = config
+                    .hotkey
+                    .parse::<HotKey>()
+                    .map_err(|e| e.to_string())
+                    .and_then(|hotkey| manager.register(hotkey).map_err(|e| e.to_string()));
+                if let Err(e) = registered {
+                    shared.note(format!("{} {}: {e}", texts.hotkey_failed, config.hotkey));
+                }
+            }
             let tray = create_tray(texts, &shared, &ctx)
                 .map_err(|e| shared.note(format!("Tray: {e}")))
                 .ok();
             Ok(Box::new(App::new(
                 shared,
                 texts,
-                prefix,
+                config.clone(),
+                config_path,
                 jobs,
                 received_replies,
                 PreviewPane::new(config.preview, previews, preview_result),
@@ -154,13 +135,13 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow!("{e}"))
 }
 
-fn register_hotkey(
-    hotkey: &str,
+/// The manager stays even if the configured shortcut is taken, so the
+/// settings window can register another one.
+fn hotkey_manager(
     shared: &Arc<Shared>,
     ctx: &egui::Context,
 ) -> anyhow::Result<GlobalHotKeyManager> {
     let manager = GlobalHotKeyManager::new()?;
-    manager.register(hotkey.parse::<HotKey>()?)?;
     let (shared, ctx) = (shared.clone(), ctx.clone());
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
         if event.state == HotKeyState::Pressed {
