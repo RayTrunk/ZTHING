@@ -42,6 +42,8 @@ pub struct Shared {
     pub window: Mutex<Option<HWND>>,
     pub quit: AtomicBool,
     pub focus_search: AtomicBool,
+    /// A query from the URL protocol or a second start, taken over by the next frame.
+    pub open_query: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -52,6 +54,7 @@ impl Shared {
             window: Mutex::new(None),
             quit: AtomicBool::new(false),
             focus_search: AtomicBool::new(false),
+            open_query: Mutex::new(None),
         }
     }
 
@@ -391,6 +394,9 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(query) = lock(&self.shared.open_query).take() {
+            self.input = query;
+        }
         let (ready, index_version, problem, service_notes) = match &*lock(&self.shared.service) {
             Service::Connecting => (false, None, None, Vec::new()),
             Service::Online(status) => (

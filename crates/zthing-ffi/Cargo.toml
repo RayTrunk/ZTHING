@@ -1,0 +1,17 @@
+[package]
+name = "zthing-ffi"
+description = "zthing.dll: C ABI for the ZTHING service, for C, C++, C# and Python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "zthing"
+crate-type = ["cdylib"]
+
+[dependencies]
+zthing-client = { version = "0.1.0", path = "../zthing-client" }
+
+[lints]
+workspace = true

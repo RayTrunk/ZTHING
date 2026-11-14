@@ -1,10 +1,11 @@
 // No console window next to the GUI.
 #![windows_subsystem = "windows"]
 
+use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::sync::{Arc, PoisonError};
 
 use anyhow::{Context, anyhow};
 use eframe::egui;
@@ -12,9 +13,12 @@ use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use winsafe::prelude::*;
+use winsafe::{HEVENT, co};
 
 use zthing_gui::app::{self, App, Shared};
 use zthing_gui::config::{self, Theme};
+use zthing_gui::http;
 use zthing_gui::text::{self, Texts};
 
 /// Rendered from `assets/` by build.rs, the sizes must match the ones there.
@@ -22,10 +26,38 @@ const WINDOW_ICON_SIZE: u32 = 256;
 const WINDOW_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window_icon.rgba"));
 const TRAY_ICON_SIZE: u32 = 32;
 const TRAY_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon.rgba"));
+/// Signals the running window that a second start handed over a query.
+/// `Local\` gives every logon session its own window.
+const OPEN_EVENT: &str = r"Local\ZTHING-open";
+/// Scheme of the URL protocol, as in `zthing:*.iso`.
+const SCHEME: &str = "zthing:";
 
 fn main() -> anyhow::Result<()> {
     let texts = text::system();
     let app_data = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+    let local_app_data = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
+    let handoff = PathBuf::from(local_app_data).join(r"ZTHING\open.txt");
+    // The URL protocol starts `zthing-gui.exe "zthing:<query>"`. Browsers
+    // percent-encode the query, a plain `+` stays a plus there.
+    let opened = std::env::args().nth(1).map(|arg| {
+        let query = arg
+            .get(..SCHEME.len())
+            .filter(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+            .map_or(arg.as_str(), |_| &arg[SCHEME.len()..]);
+        http::decode(&query.trim_start_matches("//").replace('+', "%2B"))
+    });
+
+    let open_event = HEVENT::CreateEvent(None, false, false, Some(OPEN_EVENT))?;
+    if winsafe::GetLastError() == co::ERROR::ALREADY_EXISTS {
+        // A window already runs. It shows itself and takes over a non-empty query.
+        if let Some(dir) = handoff.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&handoff, opened.unwrap_or_default())?;
+        open_event.SetEvent()?;
+        return Ok(());
+    }
+
     let (config, config_problem) =
         config::load(&PathBuf::from(app_data).join(r"ZTHING\config.toml"));
     // The service indexes every drive, so the chosen drives and excluded
@@ -48,7 +80,17 @@ fn main() -> anyhow::Result<()> {
     } else {
         format!("{drives} {exclusions}")
     };
-    let shared = Arc::new(Shared::new(config_problem.into_iter().collect()));
+    let mut notes: Vec<String> = config_problem.into_iter().collect();
+    if config.http.enabled
+        && let Err(e) = http::spawn(config.http.port, config.http.token.clone())
+    {
+        notes.push(format!("HTTP API, port {}: {e}", config.http.port));
+    }
+    let shared = Arc::new(Shared::new(notes));
+    *shared
+        .open_query
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = opened.filter(|query| !query.is_empty());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -74,6 +116,20 @@ fn main() -> anyhow::Result<()> {
             let (jobs, received_jobs) = mpsc::channel();
             let (replies, received_replies) = mpsc::channel();
             app::spawn_client(shared.clone(), ctx.clone(), received_jobs, replies);
+            let (open_shared, open_ctx) = (shared.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                while open_event.WaitForSingleObject(None).is_ok() {
+                    let query = fs::read_to_string(&handoff).unwrap_or_default();
+                    if !query.is_empty() {
+                        *open_shared
+                            .open_query
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = Some(query);
+                    }
+                    open_shared.show_window();
+                    open_ctx.request_repaint();
+                }
+            });
             let hotkeys = register_hotkey(&config.hotkey, &shared, &ctx)
                 .map_err(|e| shared.note(format!("{} {}: {e}", texts.hotkey_failed, config.hotkey)))
                 .ok();

@@ -18,6 +18,14 @@ hotkey = "Alt+Space"
 
 # system, light or dark
 theme = "system"
+
+# HTTP API for other programs: GET /search and GET /status on 127.0.0.1 only.
+# Requests send the token as "Authorization: Bearer <token>" or as ?token=<token>.
+# It runs while this window runs, with the rights of the logged-on user.
+[http]
+enabled = false
+port = 8732
+token = ""
 "#;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -27,6 +35,25 @@ pub struct Config {
     pub exclude: Vec<String>,
     pub hotkey: String,
     pub theme: Theme,
+    pub http: Http,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Http {
+    pub enabled: bool,
+    pub port: u16,
+    pub token: String,
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8732,
+            token: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +71,7 @@ impl Default for Config {
             exclude: Vec::new(),
             hotkey: "Alt+Space".to_owned(),
             theme: Theme::System,
+            http: Http::default(),
         }
     }
 }
@@ -90,5 +118,7 @@ mod tests {
         assert_eq!(config.theme, Theme::Dark);
         assert_eq!(config.hotkey, "Alt+Space");
         assert!(toml::from_str::<Config>("unknown = 1").is_err());
+        let config: Config = toml::from_str("[http]\nenabled = true\ntoken = \"t\"").unwrap();
+        assert_eq!((config.http.enabled, config.http.port), (true, 8732));
     }
 }

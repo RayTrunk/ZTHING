@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <!-- zthing.dll from "cargo build (release) -p zthing-ffi", copied next to the program. -->
+  <ItemGroup>
+    <None Include="..\..\target\release\zthing.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

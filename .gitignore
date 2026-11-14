@@ -1,1 +1,4 @@
 /target
+/examples/csharp/bin
+/examples/csharp/obj
+__pycache__/
