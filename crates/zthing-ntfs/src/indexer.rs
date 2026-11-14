@@ -12,9 +12,8 @@ const FILE_MAGIC: &[u8; 8] = b"ZTHINGDB";
 /// Raised whenever the volume part of the file changes. The index part carries
 /// its own version, see [`zthing_core::FORMAT_VERSION`].
 const FILE_VERSION: u32 = 1;
-/// Deleted entries keep their slot, so a heavily churned index is rebuilt
-/// instead of loaded once a fifth of it is dead.
-const MAX_REMOVED_SHARE: usize = 5;
+/// Deleted entries keep their slot until a compaction, which runs once a tenth of the index is dead.
+const COMPACT_SHARE: usize = 10;
 /// Replaying this many journal entries takes milliseconds, writing the file about a second.
 const SAVE_AFTER_ENTRIES: usize = 10_000;
 
@@ -60,12 +59,39 @@ impl Indexer {
         }
         if rebuilt.is_some() {
             skipped.extend(indexer.rebuild()?);
+        } else if indexer.needs_compaction() {
+            indexer.compact();
         }
         Ok((indexer, OpenReport { skipped, rebuilt }))
     }
 
     pub fn index(&self) -> &Index {
         &self.index
+    }
+
+    /// Drive letter of every indexed volume and whether its journal keeps it current.
+    pub fn volumes(&self) -> impl Iterator<Item = (char, bool)> + '_ {
+        self.states
+            .iter()
+            .map(|state| (state.drive, state.journal.is_some()))
+    }
+
+    pub fn needs_compaction(&self) -> bool {
+        self.index.removed_count() * COMPACT_SHARE > self.index.len()
+    }
+
+    /// Drops deleted entries and renumbers the rest. Ids handed out before are invalid afterwards.
+    pub fn compact(&mut self) {
+        let remap = self.index.compact();
+        let new_id = |id: u32| remap.get(id as usize).copied().flatten();
+        for state in &mut self.states {
+            // A volume root has no parent and therefore always survives.
+            state.root = new_id(state.root).unwrap_or(state.root);
+            for id in &mut state.ids {
+                *id = new_id(*id).unwrap_or(NO_ID);
+            }
+        }
+        self.unsaved = usize::MAX;
     }
 
     /// Applies the journal entries of all volumes and returns how many MFT
@@ -121,7 +147,7 @@ impl Indexer {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        // The GUI and zt share the file, so each process writes its own temporary file.
+        // Several processes may save to the same path, so each writes its own temporary file.
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
         let mut out = BufWriter::new(File::create(&temporary)?);
         out.write_all(FILE_MAGIC)?;
@@ -166,9 +192,6 @@ fn load(path: &Path, volumes: &[NtfsVolume]) -> Result<(Index, Vec<VolumeState>)
                 "{drive}: saved record map does not match the index"
             ));
         }
-    }
-    if index.removed_count() * MAX_REMOVED_SHARE > index.len() {
-        return Err("more than a fifth of the saved entries are deleted".to_owned());
     }
     Ok((index, states))
 }

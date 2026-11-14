@@ -1,24 +1,21 @@
-//! `zt <query>` searches all local NTFS volumes. Until the service of milestone 5
-//! holds the index, zt reads the volumes itself and needs administrator rights.
+//! `zt <query>` searches through the ZTHING service, which needs to run.
 
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::AtomicBool;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use zthing_core::{Index, Now, Query, SortKey};
-use zthing_ntfs::Indexer;
+use zthing_client::{Client, Field, Search, Sort};
 
 const USAGE: &str = "usage: zt [--json] [--count] [--limit N] [--sort name|path|size|dm] <query>";
+/// Results fetched per request. The service caps a page at the same size.
+const PAGE: u64 = 10_000;
 
 struct Options {
     query: String,
     json: bool,
     count: bool,
-    limit: Option<usize>,
-    sort: SortKey,
+    limit: Option<u64>,
+    sort: Sort,
 }
 
 fn main() -> ExitCode {
@@ -38,70 +35,52 @@ fn run() -> Result<bool> {
         println!("{USAGE}");
         return Ok(true);
     };
-    let now = Now {
-        unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-        utc_offset: i64::from(chrono::Local::now().offset().local_minus_utc()),
-    };
-    let query = Query::parse(&options.query, now)?;
-
-    let path = std::env::var_os("LOCALAPPDATA")
-        .map(|dir| PathBuf::from(dir).join(r"ZTHING\index.bin"))
-        .context("LOCALAPPDATA is not set")?;
-    let (mut indexer, report) = Indexer::open(&path, &zthing_ntfs::fixed_drives())?;
-    for e in &report.skipped {
-        eprintln!("zt: skipped {e}");
-    }
-    if let Some(reason) = &report.rebuilt {
-        eprintln!("zt: read all volumes again: {reason}");
-    }
-    if indexer.index().is_empty() {
-        bail!("no volume could be indexed, run zt from a terminal with administrator rights");
-    }
-    let found = print_hits(indexer.index(), &query, &options)?;
-    // Saved after printing, so the results appear without waiting for the write.
-    if indexer.needs_save() {
-        indexer
-            .save(&path)
-            .with_context(|| format!("saving {}", path.display()))?;
-    }
-    Ok(found)
-}
-
-/// Returns whether anything matched.
-fn print_hits(index: &Index, query: &Query, options: &Options) -> Result<bool> {
-    // `None` only signals cancellation, which this flag never requests.
-    let mut hits = index
-        .search(query, None, &AtomicBool::new(false))
-        .unwrap_or_default();
+    let mut client = Client::connect()?;
     if options.count {
-        println!("{}", hits.len());
-        return Ok(!hits.is_empty());
+        let total = client.count(&options.query)?;
+        println!("{total}");
+        return Ok(total > 0);
     }
-    index.sort(&mut hits, options.sort);
-    hits.truncate(options.limit.unwrap_or(hits.len()));
 
+    let wanted = options.limit.unwrap_or(u64::MAX);
+    let fields = if options.json {
+        vec![Field::Path, Field::Size, Field::Modified, Field::Folder]
+    } else {
+        vec![Field::Path]
+    };
     let mut out = BufWriter::new(io::stdout().lock());
     if options.json {
-        // Written entry by entry, so a large result never exists as one JSON value.
         writeln!(out, "[")?;
-        for (i, &id) in hits.iter().enumerate() {
-            let entry = serde_json::json!({
-                "path": index.path(id),
-                "folder": index.is_dir(id),
-                "size": index.size(id),
-                "modified": index.modified(id),
-            });
-            let comma = if i + 1 < hits.len() { "," } else { "" };
-            writeln!(out, "  {entry}{comma}")?;
+    }
+    let mut offset = 0;
+    let total = loop {
+        let page = client.search(Search {
+            query: options.query.clone(),
+            sort: options.sort,
+            offset,
+            limit: (wanted - offset).min(PAGE),
+            fields: fields.clone(),
+            ..Search::default()
+        })?;
+        for hit in &page.hits {
+            if options.json {
+                // Written entry by entry, so a large result never exists as one JSON value.
+                let separator = if offset == 0 { "" } else { ",\n" };
+                write!(out, "{separator}  {}", serde_json::to_string(hit)?)?;
+            } else {
+                writeln!(out, "{}", hit.path.as_deref().unwrap_or_default())?;
+            }
+            offset += 1;
         }
-        writeln!(out, "]")?;
-    } else {
-        for &id in &hits {
-            writeln!(out, "{}", index.path(id))?;
+        if page.hits.is_empty() || offset >= page.total.min(wanted) {
+            break page.total;
         }
+    };
+    if options.json {
+        writeln!(out, "\n]")?;
     }
     out.flush()?;
-    Ok(!hits.is_empty())
+    Ok(total > 0)
 }
 
 /// Returns `None` for `--help`.
@@ -111,7 +90,7 @@ fn parse_args() -> Result<Option<Options>> {
         json: false,
         count: false,
         limit: None,
-        sort: SortKey::Name,
+        sort: Sort::Name,
     };
     let mut terms = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -129,10 +108,10 @@ fn parse_args() -> Result<Option<Options>> {
             }
             "--sort" => {
                 options.sort = match args.next().as_deref() {
-                    Some("name") => SortKey::Name,
-                    Some("path") => SortKey::Path,
-                    Some("size") => SortKey::Size,
-                    Some("dm") => SortKey::Modified,
+                    Some("name") => Sort::Name,
+                    Some("path") => Sort::Path,
+                    Some("size") => Sort::Size,
+                    Some("dm") => Sort::Modified,
                     other => bail!("--sort expects name, path, size or dm, got {other:?}"),
                 }
             }

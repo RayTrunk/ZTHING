@@ -427,3 +427,46 @@ fn foreign_or_damaged_files_are_rejected() {
         Err(LoadError::Damaged(_) | LoadError::Io(_))
     ));
 }
+
+#[test]
+fn compaction_keeps_live_entries_and_drops_dead_ones() {
+    let mut index = sample();
+    let cancel = AtomicBool::new(false);
+    let find = |index: &Index, query: &str| {
+        let hits = index
+            .search(&Query::parse(query, NOW).unwrap(), None, &cancel)
+            .unwrap();
+        let mut paths: Vec<String> = hits.iter().map(|&id| index.path(id)).collect();
+        paths.sort();
+        paths
+    };
+    let docs = index
+        .search(
+            &Query::parse("folder:\"my docs\"", NOW).unwrap(),
+            None,
+            &cancel,
+        )
+        .unwrap()[0];
+    let zebra = index
+        .search(&Query::parse("zebra", NOW).unwrap(), None, &cancel)
+        .unwrap()[0];
+    index.remove(docs);
+    index.set_name(zebra, "Giraffe.png").unwrap();
+    let before = find(&index, "");
+
+    let remap = index.compact();
+
+    // "My Docs" is removed and budget.xlsx below it goes with it. Before the
+    // compaction the orphan was still found, with a path lacking the drive.
+    assert_eq!(index.len(), 13 - 2);
+    assert_eq!(remap[docs as usize], None);
+    assert!(before.contains(&r"My Docs\budget.xlsx".to_owned()));
+    let expected: Vec<String> = before
+        .into_iter()
+        .filter(|path| path.starts_with("C:"))
+        .collect();
+    assert_eq!(find(&index, ""), expected);
+    let new_zebra = remap[zebra as usize].unwrap();
+    assert_eq!(index.path(new_zebra), r"C:\Projects\Giraffe.png");
+    assert_eq!(index.removed_count(), 0);
+}

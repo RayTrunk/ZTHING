@@ -70,7 +70,7 @@ fn fill(input: &mut impl Read, buf: &mut [u8]) -> Result<(), LoadError> {
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Entry {
     name_offset: u32,
     name_len: u32,
@@ -159,6 +159,86 @@ impl Index {
 
     pub fn removed_count(&self) -> usize {
         self.entries.iter().filter(|e| e.parent == REMOVED).count()
+    }
+
+    /// Drops removed entries, entries below a removed folder and the names
+    /// that renames left behind. Returns the new id of every old id.
+    pub fn compact(&mut self) -> Vec<Option<u32>> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum State {
+            Unknown,
+            Visiting,
+            Live,
+            Dead,
+        }
+        let mut states = vec![State::Unknown; self.entries.len()];
+        let mut chain = Vec::new();
+        for start in 0..self.entries.len() {
+            let mut at = start;
+            let live = loop {
+                match states[at] {
+                    State::Live => break true,
+                    State::Dead | State::Visiting => break false,
+                    State::Unknown => {
+                        states[at] = State::Visiting;
+                        chain.push(at);
+                        match self.entries[at].parent {
+                            NO_PARENT => break true,
+                            REMOVED => break false,
+                            parent => at = parent as usize,
+                        }
+                    }
+                }
+            };
+            let verdict = if live { State::Live } else { State::Dead };
+            for at in chain.drain(..) {
+                states[at] = verdict;
+            }
+        }
+
+        let mut remap = vec![None; self.entries.len()];
+        let mut next = 0u32;
+        for (slot, state) in remap.iter_mut().zip(&states) {
+            if *state == State::Live {
+                *slot = Some(next);
+                next += 1;
+            }
+        }
+        let live_names: usize = self
+            .entries
+            .iter()
+            .zip(&states)
+            .filter(|(_, state)| **state == State::Live)
+            .map(|(entry, _)| entry.name_len as usize)
+            .sum();
+        let mut compacted = Index {
+            names: String::with_capacity(with_headroom(live_names)),
+            names_folded: String::with_capacity(with_headroom(live_names)),
+            entries: Vec::with_capacity(with_headroom(next as usize)),
+            folder_paths: OnceLock::new(),
+        };
+        for (old, entry) in self.entries.iter().enumerate() {
+            if remap[old].is_none() {
+                continue;
+            }
+            let start = entry.name_offset as usize;
+            let end = start + entry.name_len as usize;
+            compacted.entries.push(Entry {
+                name_offset: compacted.names.len() as u32,
+                parent: match entry.parent {
+                    NO_PARENT => NO_PARENT,
+                    parent => remap[parent as usize].unwrap_or(NO_PARENT),
+                },
+                ..*entry
+            });
+            // Folded names share the layout of the originals, so both slices copy as they are.
+            compacted.names.push_str(&self.names[start..end]);
+            compacted
+                .names_folded
+                .push_str(&self.names_folded[start..end]);
+        }
+        *self = compacted;
+        remap
     }
 
     /// Writes the format that [`Index::load`] reads. The folded names are
@@ -316,6 +396,12 @@ impl Index {
         let mut path = String::new();
         self.write_path(id, &self.names, &mut path);
         path
+    }
+
+    /// `None` for volume roots and removed entries.
+    pub fn parent(&self, id: u32) -> Option<u32> {
+        let parent = self.entries[id as usize].parent;
+        (parent != NO_PARENT && parent != REMOVED).then_some(parent)
     }
 
     pub fn is_dir(&self, id: u32) -> bool {

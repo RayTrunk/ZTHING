@@ -1,0 +1,22 @@
+[package]
+name = "zthing-service"
+description = "Windows service that keeps the ZTHING index and answers the pipe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes"] }
+windows-service = "0.8.1"
+zthing-client = { version = "0.1.0", path = "../zthing-client" }
+zthing-core = { version = "0.1.0", path = "../zthing-core" }
+zthing-ntfs = { version = "0.1.0", path = "../zthing-ntfs" }
+
+[lints]
+workspace = true

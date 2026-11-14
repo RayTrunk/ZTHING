@@ -12,10 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 serde_json = "1.0.154"
-zthing-core = { version = "0.1.0", path = "../zthing-core" }
-zthing-ntfs = { version = "0.1.0", path = "../zthing-ntfs" }
+zthing-client = { version = "0.1.0", path = "../zthing-client" }
 
 [lints]
 workspace = true
