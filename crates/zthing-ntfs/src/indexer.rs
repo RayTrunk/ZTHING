@@ -264,8 +264,10 @@ fn read_states(input: &mut impl Read) -> io::Result<Vec<VolumeState>> {
             return Err(invalid("record map is truncated".to_owned()));
         }
         let ids = bytes
-            .chunks_exact(4)
-            .map(|id| u32::from_le_bytes([id[0], id[1], id[2], id[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&id| u32::from_le_bytes(id))
             .collect();
         let link_count = u64::from_le_bytes(array(input)?);
         let mut links = HashMap::new();

@@ -542,8 +542,10 @@ fn decode_name(utf16: &[u8], out: &mut String) {
     out.extend(
         char::decode_utf16(
             utf16
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&pair| u16::from_le_bytes(pair)),
         )
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
     );

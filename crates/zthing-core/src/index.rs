@@ -304,7 +304,7 @@ impl Index {
         while entries.len() < count {
             let len = (count - entries.len()).min(LOAD_CHUNK) * ENTRY_BYTES;
             fill(input, &mut chunk[..len])?;
-            for bytes in chunk[..len].chunks_exact(ENTRY_BYTES) {
+            for bytes in chunk[..len].as_chunks::<ENTRY_BYTES>().0 {
                 let u32_at = |at: usize| {
                     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
                 };
@@ -342,8 +342,10 @@ impl Index {
             fill(input, &mut chunk[..len])?;
             groups.extend(
                 chunk[..len]
-                    .chunks_exact(4)
-                    .map(|group| u32::from_le_bytes([group[0], group[1], group[2], group[3]])),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&group| u32::from_le_bytes(group)),
             );
         }
         let mut names_folded = String::with_capacity(with_headroom(names.len()));

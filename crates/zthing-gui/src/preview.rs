@@ -98,8 +98,10 @@ fn load(path: String) -> Preview {
 fn decode_text(bytes: &[u8]) -> Option<String> {
     if let Some(units) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let units = units
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair));
         return Some(
             char::decode_utf16(units)
                 .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))

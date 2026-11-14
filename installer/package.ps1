@@ -38,8 +38,9 @@ foreach ($example in 'c', 'csharp', 'python') {
 Remove-Item -Recurse -Force "$out\sdk\examples\csharp\bin", "$out\sdk\examples\csharp\obj" -ErrorAction SilentlyContinue
 Copy-Item README.md, README.de.md, LICENSE $out
 # build.rs of zthing-gui renders the icon; the newest build has the current logo.
-$icon = Get-ChildItem "$target\release\build\zthing-gui-*\out\zthing.ico" |
+$icon = Get-ChildItem (Join-Path $target 'release\build') -Recurse -Filter zthing.ico -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $icon) { throw "zthing.ico not found below $target\release\build; did the zthing-gui build script run?" }
 Copy-Item $icon.FullName "$out\zthing.ico"
 
 $signtool = $null

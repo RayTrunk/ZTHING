@@ -119,7 +119,7 @@ fn visuals(scheme: &Scheme) -> egui::Visuals {
     v.weak_text_color = Some(rgb(scheme.text_dim));
     v.panel_fill = window;
     v.window_fill = window;
-    v.window_stroke = Stroke::new(1.0, rgb(scheme.line));
+    v.window_stroke = Stroke::new(1.0_f32, rgb(scheme.line));
     v.extreme_bg_color = rgb(scheme.tab_active);
     // Every other list row, a small step from the list background towards the text.
     v.faint_bg_color = rgb(scheme.tab_active).lerp_to_gamma(text, 0.04);
@@ -131,8 +131,8 @@ fn visuals(scheme: &Scheme) -> egui::Visuals {
         Color32::WHITE
     };
     v.selection.bg_fill = accent;
-    v.selection.stroke = Stroke::new(1.0, on_accent);
-    let line = Stroke::new(1.0, rgb(scheme.line));
+    v.selection.stroke = Stroke::new(1.0_f32, on_accent);
+    let line = Stroke::new(1.0_f32, rgb(scheme.line));
     v.widgets.noninteractive.bg_stroke = line;
     v.widgets.noninteractive.bg_fill = window;
     for widget in [&mut v.widgets.inactive, &mut v.widgets.open] {
@@ -142,7 +142,7 @@ fn visuals(scheme: &Scheme) -> egui::Visuals {
     }
     v.widgets.hovered.bg_fill = rgb(scheme.hover);
     v.widgets.hovered.weak_bg_fill = rgb(scheme.hover);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, rgb(scheme.hover_line));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, rgb(scheme.hover_line));
     // The active foreground stays as egui sets it: strong text such as the
     // column headers takes its colour, so it must contrast with the window.
     v.widgets.active.bg_fill = accent;

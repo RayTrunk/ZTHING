@@ -100,8 +100,8 @@ fn pixels(bitmap: HBITMAP) -> Result<Thumbnail> {
         return Err(Error::from_thread());
     }
     // Bitmaps without an alpha channel come back with alpha 0 everywhere.
-    let opaque = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
-    for pixel in pixels.chunks_exact_mut(4) {
+    let opaque = pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0);
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         if opaque {
             pixel[3] = 255;
