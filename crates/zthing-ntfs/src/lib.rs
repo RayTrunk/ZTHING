@@ -36,6 +36,7 @@ const SECTOR_ALIGNMENT: usize = 4096;
 const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
 const USN_REASON_SECURITY_CHANGE: u32 = 0x0000_0800;
 const USN_REASON_RENAME_OLD_NAME: u32 = 0x0000_1000;
+const USN_REASON_HARD_LINK_CHANGE: u32 = 0x0001_0000;
 /// Access group = (volume number + 1) << 24 | NTFS security id.
 const GROUP_SHIFT: u32 = 24;
 const OVERWRITTEN: &str = "journal entries since the last update were overwritten";
@@ -68,6 +69,8 @@ pub struct VolumeState {
     root: u32,
     /// Index id per MFT record number.
     ids: Vec<u32>,
+    /// Further index ids of records with several hard links, one per extra link.
+    links: HashMap<usize, Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,14 +86,40 @@ impl VolumeState {
     }
 
     pub fn heap_size(&self) -> usize {
-        self.ids.capacity() * size_of::<u32>()
+        let links: usize = self.links.values().map(Vec::capacity).sum();
+        (self.ids.capacity() + links) * size_of::<u32>()
+            + self.links.capacity() * size_of::<(usize, Vec<u32>)>()
+    }
+
+    /// Every index id of a record, one per hard link.
+    fn ids_of(&self, record: usize) -> impl Iterator<Item = u32> + '_ {
+        let first = self.ids.get(record).copied().filter(|&id| id != NO_ID);
+        first
+            .into_iter()
+            .chain(self.links.get(&record).into_iter().flatten().copied())
+    }
+
+    /// Replaces the ids of a record. An empty `ids` drops the record.
+    fn set_ids(&mut self, record: usize, ids: &[u32]) {
+        if record >= self.ids.len() {
+            self.ids.resize(record + 1, NO_ID);
+        }
+        self.ids[record] = ids.first().copied().unwrap_or(NO_ID);
+        match ids.get(1..) {
+            Some(more) if !more.is_empty() => {
+                self.links.insert(record, more.to_vec());
+            }
+            _ => {
+                self.links.remove(&record);
+            }
+        }
     }
 
     fn forget(&mut self, index: &mut Index, record: usize) {
-        if let Some(id) = self.ids.get_mut(record).filter(|id| **id != NO_ID) {
-            index.remove(*id);
-            *id = NO_ID;
+        for id in self.ids_of(record) {
+            index.remove(id);
         }
+        self.set_ids(record, &[]);
     }
 }
 
@@ -144,6 +173,7 @@ impl NtfsVolume {
         let record_count = (layout.mft_len / layout.record as u64) as usize;
         let mut ids = vec![NO_ID; record_count.max(FIRST_USER_RECORD)];
         ids[ROOT_RECORD] = root;
+        let mut links: HashMap<usize, Vec<u32>> = HashMap::new();
         let mut parents = Vec::new();
         // Sizes from extension records that precede their base record.
         let mut early_sizes = HashMap::new();
@@ -171,25 +201,29 @@ impl NtfsVolume {
                     if target < FIRST_USER_RECORD || target >= ids.len() {
                         continue;
                     }
-                    let id = match (ids[target], file.name) {
-                        (NO_ID, Some((parent, utf16))) => {
-                            decode_name(utf16, &mut name);
-                            let id = index.push(&name, None, 0, 0, 0)?;
-                            ids[target] = id;
-                            parents.push((id, parent));
+                    // Each long name is one hard link and becomes its own entry.
+                    // A name can also sit in an extension record.
+                    let names = file.name.into_iter().chain(file.more_names.iter().copied());
+                    for (parent, utf16) in names {
+                        decode_name(utf16, &mut name);
+                        let link = index.push(&name, None, 0, 0, 0)?;
+                        parents.push((link, parent));
+                        if ids[target] == NO_ID {
+                            ids[target] = link;
                             if let Some(size) = early_sizes.remove(&target) {
-                                index.set_size(id, size);
+                                index.set_size(link, size);
                             }
-                            id
+                        } else {
+                            links.entry(target).or_default().push(link);
                         }
-                        (NO_ID, None) => {
-                            if let Some(size) = file.size {
-                                early_sizes.insert(target, size);
-                            }
-                            continue;
+                    }
+                    let id = ids[target];
+                    if id == NO_ID {
+                        if let Some(size) = file.size {
+                            early_sizes.insert(target, size);
                         }
-                        (id, _) => id,
-                    };
+                        continue;
+                    }
                     apply_metadata(index, id, &file, group_base);
                 }
                 offset += len as u64;
@@ -197,12 +231,19 @@ impl NtfsVolume {
             }
         }
 
+        // Metadata reached only the first link of each record while reading.
+        for (&record, more) in &links {
+            for &link in more {
+                index.copy_metadata(ids[record], link);
+            }
+        }
         let state = VolumeState {
             drive: self.drive,
             serial: layout.serial,
             journal,
             root,
             ids,
+            links,
         };
         // Some internal files, such as $RmMetadata, name the root as parent in
         // their $FILE_NAME but are missing from the root's directory listing.
@@ -236,6 +277,8 @@ impl NtfsVolume {
 
         // Record number -> file reference of entries whose size and date must be read.
         let mut refresh = HashMap::new();
+        // Record number -> file reference of entries whose hard links must be read.
+        let mut relink = HashMap::new();
         let mut name = String::new();
         let mut count = 0;
         let mut input = READ_USN_JOURNAL_DATA_V0 {
@@ -259,7 +302,7 @@ impl NtfsVolume {
                 .ok_or_else(|| self.journal_error("unexpected USN journal output"))?;
             for change in changes {
                 count += 1;
-                self.apply_change(index, state, &change, &mut name, &mut refresh)?;
+                self.apply_change(index, state, &change, &mut name, &mut refresh, &mut relink)?;
             }
             if next == input.StartUsn {
                 break;
@@ -267,14 +310,28 @@ impl NtfsVolume {
             input.StartUsn = next;
         }
 
+        for (record, file_reference) in relink {
+            match self.volume.hard_links(file_reference) {
+                Ok(buf) => {
+                    if let Some(links) = parse::hard_links(&buf) {
+                        self.relink(index, state, record as usize, &links, &mut name)?;
+                    }
+                }
+                // The file is gone, deleted with its last link.
+                Err(_) => {
+                    state.forget(index, record as usize);
+                    refresh.remove(&record);
+                }
+            }
+        }
         for (record, file_reference) in refresh {
             // A file deleted after its last journal entry fails to open. Its
             // deletion arrives with the next update.
-            if let Some(id) = state.id(record)
-                && let Ok((size, filetime)) = self.volume.file_info(file_reference)
-            {
-                index.set_size(id, size);
-                index.set_modified(id, parse::unix_from_filetime(filetime as u64));
+            if let Ok((size, filetime)) = self.volume.file_info(file_reference) {
+                for id in state.ids_of(record as usize) {
+                    index.set_size(id, size);
+                    index.set_modified(id, parse::unix_from_filetime(filetime as u64));
+                }
             }
         }
         state.journal = Some(Journal {
@@ -294,9 +351,17 @@ impl NtfsVolume {
         change: &UsnChange<'_>,
         name: &mut String,
         refresh: &mut HashMap<u64, u64>,
+        relink: &mut HashMap<u64, u64>,
     ) -> Result<(), NtfsError> {
         let record = change.record as usize;
         if record < FIRST_USER_RECORD || change.reason & USN_REASON_RENAME_OLD_NAME != 0 {
+            return Ok(());
+        }
+        // An entry names one link but not whether it was added, removed or
+        // renamed, so the links are read from the file system after the journal.
+        if change.reason & USN_REASON_HARD_LINK_CHANGE != 0 || state.links.contains_key(&record) {
+            relink.insert(change.record, change.file_reference);
+            refresh.insert(change.record, change.file_reference);
             return Ok(());
         }
         let parent = state
@@ -326,10 +391,7 @@ impl NtfsVolume {
             }
             None => {
                 let id = index.push(name, Some(parent), 0, 0, 0)?;
-                if record >= state.ids.len() {
-                    state.ids.resize(record + 1, NO_ID);
-                }
-                state.ids[record] = id;
+                state.set_ids(record, &[id]);
                 id
             }
         };
@@ -339,6 +401,67 @@ impl NtfsVolume {
             index.set_group(id, 0);
         }
         refresh.insert(change.record, change.file_reference);
+        Ok(())
+    }
+
+    /// Makes the entries of `record` match its current hard links. Entries whose
+    /// name and folder still exist keep their id, the others take over new
+    /// links or go. New entries copy the metadata of an existing one.
+    fn relink(
+        &self,
+        index: &mut Index,
+        state: &mut VolumeState,
+        record: usize,
+        links: &[(u64, &[u8])],
+        name: &mut String,
+    ) -> Result<(), NtfsError> {
+        let mut current: Vec<u32> = state
+            .ids_of(record)
+            .filter(|&id| !index.is_removed(id))
+            .collect();
+        let template = current.first().copied();
+        let mut wanted = Vec::new();
+        for &(parent, utf16) in links {
+            let Some(parent) = state.id(parent).filter(|&p| !index.is_removed(p)) else {
+                continue;
+            };
+            decode_name(utf16, name);
+            // The same rule as in `read`: root children must be listed in the root.
+            if parent == state.root
+                && fs::symlink_metadata(format!(r"{}:\{name}", self.drive)).is_err()
+            {
+                continue;
+            }
+            wanted.push((parent, name.clone()));
+        }
+        let mut kept = Vec::new();
+        wanted.retain(|(parent, name)| {
+            let same = current
+                .iter()
+                .position(|&id| index.parent(id) == Some(*parent) && index.name(id) == name);
+            same.map(|at| kept.push(current.swap_remove(at))).is_none()
+        });
+        for (parent, name) in wanted {
+            let id = match current.pop() {
+                Some(id) => {
+                    index.set_name(id, &name)?;
+                    index.set_parent(id, Some(parent));
+                    id
+                }
+                None => {
+                    let id = index.push(&name, Some(parent), 0, 0, 0)?;
+                    if let Some(template) = template {
+                        index.copy_metadata(template, id);
+                    }
+                    id
+                }
+            };
+            kept.push(id);
+        }
+        for id in current {
+            index.remove(id);
+        }
+        state.set_ids(record, &kept);
         Ok(())
     }
 

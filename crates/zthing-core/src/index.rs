@@ -436,6 +436,18 @@ impl Index {
         self.groups[id as usize] = group;
     }
 
+    /// Gives `to` the attributes, size, date and access group of `from`. Hard
+    /// links of one file share all of them and differ only in name and folder.
+    pub fn copy_metadata(&mut self, from: u32, to: u32) {
+        let source = self.entries[from as usize];
+        let entry = &mut self.entries[to as usize];
+        entry.attributes = source.attributes;
+        entry.size = source.size;
+        entry.modified = source.modified;
+        self.groups[to as usize] = self.groups[from as usize];
+        self.folder_paths.take();
+    }
+
     pub fn is_dir(&self, id: u32) -> bool {
         self.entries[id as usize].attributes & ATTRIBUTE_DIRECTORY != 0
     }

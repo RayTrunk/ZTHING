@@ -54,6 +54,8 @@ fn mft_matches_walkdir() {
     ] {
         fs::write(base.join(file), vec![7u8; len]).unwrap();
     }
+    // walkdir lists every hard link, so the index must hold both names.
+    fs::hard_link(base.join("a/y.bin"), base.join("leer/y-link.bin")).unwrap();
     let expected = walk(&base);
 
     let drive = base

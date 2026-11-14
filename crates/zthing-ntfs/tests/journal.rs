@@ -131,3 +131,72 @@ fn saved_index_is_replayed_or_rebuilt() {
 
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Paths of all live entries named `name`, sorted.
+fn paths(indexer: &Indexer, name: &str) -> Vec<String> {
+    let now = Now {
+        unix: 0,
+        utc_offset: 0,
+    };
+    let query = Query::parse(&format!("regex:\"^{}$\"", name.replace('.', r"\.")), now).unwrap();
+    let index = indexer.index();
+    let mut paths: Vec<String> = index
+        .search(&query, None, &AtomicBool::new(false))
+        .unwrap()
+        .into_iter()
+        .map(|id| index.path(id))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+#[ignore = "needs administrator rights"]
+fn every_hard_link_is_an_entry() {
+    let dir = scratch("journal-links");
+    let files = dir.join("files");
+    let a = format!("zthing-link-{}-a.txt", std::process::id());
+    let b = format!("zthing-link-{}-b.txt", std::process::id());
+    let at = |name: &str| files.join(name).to_string_lossy().into_owned();
+    let in_sub = |name: &str| files.join("sub").join(name).to_string_lossy().into_owned();
+    // `paths` sorts, and "sub" sorts before the test file names.
+    let both = |name: &str| vec![in_sub(name), at(name)];
+
+    // Linked before the volume is read, so the $MFT holds both names.
+    fs::write(files.join(&a), b"0123").unwrap();
+    fs::hard_link(files.join(&a), files.join("sub").join(&a)).unwrap();
+    let (mut indexer, _) = Indexer::open(&dir.join("index.bin"), &[drive(&dir)]).unwrap();
+    assert_eq!(paths(&indexer, &a), both(&a));
+    assert!(find(&indexer, &a).is_some_and(|(_, size)| size == 4));
+
+    fs::hard_link(files.join(&a), files.join(&b)).unwrap();
+    let added = wait_for("add link", &mut indexer, |i| {
+        paths(i, &b) == [at(&b)] && paths(i, &a).len() == 2
+    });
+
+    fs::rename(files.join("sub").join(&a), files.join("sub").join(&b)).unwrap();
+    let renamed = wait_for("rename link", &mut indexer, |i| {
+        paths(i, &a) == [at(&a)] && paths(i, &b) == both(&b)
+    });
+
+    fs::write(files.join(&a), vec![7u8; 3000]).unwrap();
+    let resized = wait_for("resize", &mut indexer, |i| {
+        paths(i, &b).len() == 2
+            && find(i, &b).is_some_and(|(_, size)| size == 3000)
+            && find(i, &a).is_some_and(|(_, size)| size == 3000)
+    });
+
+    fs::remove_file(files.join(&a)).unwrap();
+    let removed = wait_for("remove link", &mut indexer, |i| {
+        paths(i, &a).is_empty() && paths(i, &b).len() == 2
+    });
+
+    fs::remove_file(files.join(&b)).unwrap();
+    fs::remove_file(files.join("sub").join(&b)).unwrap();
+    let deleted = wait_for("delete", &mut indexer, |i| paths(i, &b).is_empty());
+
+    eprintln!(
+        "latency: add {added:?}, rename {renamed:?}, resize {resized:?}, remove {removed:?}, delete {deleted:?}"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}

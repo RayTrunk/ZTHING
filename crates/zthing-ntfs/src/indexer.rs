@@ -1,5 +1,6 @@
 //! Loads, updates and saves the index of all volumes.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -11,7 +12,7 @@ use crate::{Journal, NO_ID, NtfsError, NtfsVolume, VolumeState};
 const FILE_MAGIC: &[u8; 8] = b"ZTHINGDB";
 /// Raised whenever the volume part of the file changes. The index part carries
 /// its own version, see [`zthing_core::FORMAT_VERSION`].
-const FILE_VERSION: u32 = 1;
+const FILE_VERSION: u32 = 2;
 /// Deleted entries keep their slot until a compaction, which runs once a tenth of the index is dead.
 const COMPACT_SHARE: usize = 10;
 /// Replaying this many journal entries takes milliseconds, writing the file about a second.
@@ -89,6 +90,12 @@ impl Indexer {
             state.root = new_id(state.root).unwrap_or(state.root);
             for id in &mut state.ids {
                 *id = new_id(*id).unwrap_or(NO_ID);
+            }
+            let records: Vec<usize> = state.links.keys().copied().collect();
+            for record in records {
+                // A dropped first link hands its place to the next surviving one.
+                let ids: Vec<u32> = state.ids_of(record).filter_map(new_id).collect();
+                state.set_ids(record, &ids);
             }
         }
         self.unsaved = usize::MAX;
@@ -187,7 +194,14 @@ fn load(path: &Path, volumes: &[NtfsVolume]) -> Result<(Index, Vec<VolumeState>)
             return Err(format!("{drive}: has no USN journal to replay"));
         }
         let valid = |id: u32| (id as usize) < index.len();
-        if !valid(state.root) || !state.ids.iter().all(|&id| id == NO_ID || valid(id)) {
+        let links = state.links.values().flatten();
+        if !valid(state.root)
+            || !state
+                .ids
+                .iter()
+                .chain(links)
+                .all(|&id| id == NO_ID || valid(id))
+        {
             return Err(format!(
                 "{drive}: saved record map does not match the index"
             ));
@@ -207,6 +221,14 @@ fn write_state(out: &mut impl Write, state: &VolumeState) -> io::Result<()> {
     out.write_all(&(state.ids.len() as u64).to_le_bytes())?;
     for id in &state.ids {
         out.write_all(&id.to_le_bytes())?;
+    }
+    out.write_all(&(state.links.len() as u64).to_le_bytes())?;
+    for (&record, ids) in &state.links {
+        out.write_all(&(record as u64).to_le_bytes())?;
+        out.write_all(&(ids.len() as u32).to_le_bytes())?;
+        for id in ids {
+            out.write_all(&id.to_le_bytes())?;
+        }
     }
     Ok(())
 }
@@ -245,12 +267,26 @@ fn read_states(input: &mut impl Read) -> io::Result<Vec<VolumeState>> {
             .chunks_exact(4)
             .map(|id| u32::from_le_bytes([id[0], id[1], id[2], id[3]]))
             .collect();
+        let link_count = u64::from_le_bytes(array(input)?);
+        let mut links = HashMap::new();
+        for _ in 0..link_count {
+            let record = usize::try_from(u64::from_le_bytes(array(input)?))
+                .map_err(|_| invalid("hard link record".to_owned()))?;
+            let count = u32::from_le_bytes(array(input)?);
+            // Pushed one by one, so a damaged count fails at the end of the file.
+            let mut more = Vec::new();
+            for _ in 0..count {
+                more.push(u32::from_le_bytes(array(input)?));
+            }
+            links.insert(record, more);
+        }
         states.push(VolumeState {
             drive,
             serial,
             journal: has_journal.then_some(journal),
             root,
             ids,
+            links,
         });
     }
     Ok(states)

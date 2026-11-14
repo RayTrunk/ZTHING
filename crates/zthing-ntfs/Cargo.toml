@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror = "2.0.21"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
+windows = { version = "0.62.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 zthing-core = { version = "0.1.0", path = "../zthing-core" }
 
 [lints]

@@ -1,7 +1,8 @@
 //! All Windows calls of the crate. Each `unsafe` block only passes buffers
 //! that stay alive and unaliased for the duration of a synchronous call.
 
-use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
+use windows::Wdk::Storage::FileSystem::{FileHardLinkInformation, NtQueryInformationFile};
+use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, STATUS_BUFFER_OVERFLOW};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
@@ -9,7 +10,9 @@ use windows::Win32::Storage::FileSystem::{
     FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
     GetVolumeInformationW, OPEN_EXISTING, OpenFileById, ReadFile,
 };
-use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+use windows::Win32::System::IO::{
+    DeviceIoControl, IO_STATUS_BLOCK, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0,
+};
 use windows::core::{HSTRING, Result};
 
 /// `DRIVE_FIXED` from WinBase.h. The windows crate only exports it behind the
@@ -105,28 +108,14 @@ impl Volume {
     }
 }
 
+/// Bytes for the hard link list of a typical file. Larger lists are fetched with the size Windows asks for.
+const LINKS_BUFFER: usize = 4096;
+
 impl Volume {
     /// Size and last write time (FILETIME) of a file on this volume, read through
     /// the file system and therefore never older than its cached metadata.
     pub fn file_info(&self, file_reference: u64) -> Result<(u64, i64)> {
-        let id = FILE_ID_DESCRIPTOR {
-            dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
-            Type: FileIdType,
-            Anonymous: FILE_ID_DESCRIPTOR_0 {
-                FileId: file_reference as i64,
-            },
-        };
-        // SAFETY: `id` outlives the call. The returned handle is closed below.
-        let file = unsafe {
-            OpenFileById(
-                self.handle,
-                &id,
-                FILE_READ_ATTRIBUTES.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                FILE_FLAG_BACKUP_SEMANTICS,
-            )
-        }?;
+        let file = self.open_by_id(file_reference)?;
         let mut basic = FILE_BASIC_INFO::default();
         let mut standard = FILE_STANDARD_INFO::default();
         // SAFETY: each buffer has exactly the size of its information class.
@@ -150,6 +139,60 @@ impl Volume {
         let _ = unsafe { CloseHandle(file) };
         result?;
         Ok((standard.EndOfFile as u64, basic.LastWriteTime))
+    }
+
+    /// The `FILE_LINKS_INFORMATION` of a file, one entry per hard link, for
+    /// [`crate::parse::hard_links`]. Win32 offers no call that names the parent
+    /// folders by id, so this goes through ntdll.
+    pub fn hard_links(&self, file_reference: u64) -> Result<Vec<u8>> {
+        let file = self.open_by_id(file_reference)?;
+        // u64 elements give the 8-byte alignment of FILE_LINKS_INFORMATION.
+        let mut buf = vec![0u64; LINKS_BUFFER / 8];
+        let status = loop {
+            let mut io = IO_STATUS_BLOCK::default();
+            // SAFETY: `io` and `buf` outlive the synchronous call, the length matches the buffer.
+            let status = unsafe {
+                NtQueryInformationFile(
+                    file,
+                    &mut io,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 8) as u32,
+                    FileHardLinkInformation,
+                )
+            };
+            // BytesNeeded at offset 0 tells the full size of a list that did not fit.
+            let needed = buf[0] as u32 as usize;
+            if status != STATUS_BUFFER_OVERFLOW || needed <= buf.len() * 8 {
+                break status;
+            }
+            buf = vec![0u64; needed.div_ceil(8)];
+        };
+        // SAFETY: the handle came from OpenFileById and is closed exactly once.
+        let _ = unsafe { CloseHandle(file) };
+        status.ok()?;
+        Ok(buf.iter().flat_map(|word| word.to_le_bytes()).collect())
+    }
+
+    /// The caller closes the handle.
+    fn open_by_id(&self, file_reference: u64) -> Result<HANDLE> {
+        let id = FILE_ID_DESCRIPTOR {
+            dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: FileIdType,
+            Anonymous: FILE_ID_DESCRIPTOR_0 {
+                FileId: file_reference as i64,
+            },
+        };
+        // SAFETY: `id` outlives the call.
+        unsafe {
+            OpenFileById(
+                self.handle,
+                &id,
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                FILE_FLAG_BACKUP_SEMANTICS,
+            )
+        }
     }
 }
 

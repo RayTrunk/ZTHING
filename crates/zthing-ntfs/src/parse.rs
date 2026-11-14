@@ -121,8 +121,10 @@ pub(crate) struct FileRecord<'a> {
     pub security: Option<u32>,
     pub size: Option<u64>,
     /// Parent record number and UTF-16LE name of the first long `$FILE_NAME`.
-    /// Further hard links of the same file are ignored.
     pub name: Option<(u64, &'a [u8])>,
+    /// Further long names, one per additional hard link. Kept apart from
+    /// `name` so that the common single-name record allocates nothing.
+    pub more_names: Vec<(u64, &'a [u8])>,
 }
 
 /// Applies the fixups in place and reads the attributes ZTHING indexes.
@@ -143,6 +145,7 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
         size: None,
         security: None,
         name: None,
+        more_names: Vec::new(),
     };
     for (kind, attr) in attributes(record) {
         let non_resident = *attr.get(8)? != 0;
@@ -158,13 +161,16 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
                     file.security = Some(u32_at(attr, content + 52)?);
                 }
             }
-            ATTR_FILE_NAME if !non_resident && file.name.is_none() => {
+            ATTR_FILE_NAME if !non_resident => {
                 let content = usize::from(u16_at(attr, 20)?);
                 let len = usize::from(*attr.get(content + 64)?);
                 if *attr.get(content + 65)? != NAMESPACE_DOS {
                     let parent = u64_at(attr, content)? & RECORD_MASK;
                     let name = attr.get(content + 66..content + 66 + 2 * len)?;
-                    file.name = Some((parent, name));
+                    match file.name {
+                        None => file.name = Some((parent, name)),
+                        Some(_) => file.more_names.push((parent, name)),
+                    }
                 }
             }
             ATTR_DATA if unnamed && !non_resident => {
@@ -176,6 +182,27 @@ pub(crate) fn file_record(record: &mut [u8]) -> Option<FileRecord<'_>> {
         }
     }
     Some(file)
+}
+
+/// Parent record number and UTF-16LE name of every hard link in a
+/// `FILE_LINKS_INFORMATION` buffer from `NtQueryInformationFile`.
+pub(crate) fn hard_links(buf: &[u8]) -> Option<Vec<(u64, &[u8])>> {
+    let count = u32_at(buf, 4)?;
+    let mut links = Vec::new();
+    // FILE_LINK_ENTRY_INFORMATION: next entry offset at 0, parent file id at 8,
+    // name length in characters at 16, name at 20. The first entry starts at 8.
+    let mut at = 8usize;
+    for _ in 0..count {
+        let entry = buf.get(at..)?;
+        let parent = u64_at(entry, 8)? & RECORD_MASK;
+        let len = u32_at(entry, 16)? as usize;
+        links.push((parent, entry.get(20..20 + 2 * len)?));
+        match u32_at(entry, 0)? {
+            0 => break,
+            next => at = at.checked_add(next as usize)?,
+        }
+    }
+    Some(links)
 }
 
 /// Volume byte ranges of the $MFT, from the unnamed `$DATA` attribute of MFT record 0.
@@ -366,9 +393,52 @@ mod tests {
                 size: Some(400),
                 security: None,
                 name: Some((5, long_name.as_slice())),
+                more_names: Vec::new(),
             })
         );
         assert_eq!(&rec[510..512], &[0x11, 0x11]);
+    }
+
+    #[test]
+    fn every_long_name_is_a_hard_link() {
+        let mut rec = record(
+            RECORD_IN_USE,
+            0,
+            &[
+                file_name(0x0002_0000_0000_0040, 1, "a.dll"),
+                file_name(0x0002_0000_0000_0041, NAMESPACE_DOS, "B~1.DLL"),
+                // CreateHardLink writes POSIX names (namespace 0).
+                file_name(0x0007_0000_0000_0042, 0, "b.dll"),
+            ],
+        );
+        let file = file_record(&mut rec).unwrap();
+        assert_eq!(file.name, Some((0x40, utf16("a.dll").as_slice())));
+        assert_eq!(file.more_names, [(0x42, utf16("b.dll").as_slice())]);
+    }
+
+    #[test]
+    fn hard_link_list_follows_the_entry_offsets() {
+        let mut buf = vec![0u8; 8];
+        put(&mut buf, 4, &2u32.to_le_bytes());
+        for (parent, name, last) in [(0x0001_0000_0000_0010u64, "x", false), (0x11, "yz", true)] {
+            let name = utf16(name);
+            let mut entry = vec![0u8; (20 + name.len()).next_multiple_of(8)];
+            let next = if last { 0 } else { entry.len() as u32 };
+            put(&mut entry, 0, &next.to_le_bytes());
+            put(&mut entry, 8, &parent.to_le_bytes());
+            put(&mut entry, 16, &((name.len() / 2) as u32).to_le_bytes());
+            put(&mut entry, 20, &name);
+            buf.extend(entry);
+        }
+        let links = hard_links(&buf).unwrap();
+        assert_eq!(
+            links,
+            [
+                (0x10, utf16("x").as_slice()),
+                (0x11, utf16("yz").as_slice())
+            ]
+        );
+        assert_eq!(hard_links(&buf[..30]), None);
     }
 
     #[test]
