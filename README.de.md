@@ -8,13 +8,14 @@ Millionen Dateien, während du tippst.
 
 ![ZTHING-Suchfenster mit Treffern und Bildvorschau](docs/screenshots/main-quill-dark.png)
 
-- Ergebnisse beim Tippen: Eine Suche über 3,8 Millionen Einträge dauert 3 bis 31 ms.
-- Immer aktuell: Neue, umbenannte und gelöschte Dateien erscheinen nach etwa einer Sekunde.
-- Ein Index für alles: Suchfenster, Kommandozeile `zt`, eine DLL für C, C++ und
-  C#, ein Python-Paket, eine optionale HTTP-API und das URL-Protokoll `zthing:`
-  fragen alle denselben Windows-Dienst.
-- Jeder sieht nur, was er öffnen darf: Der Dienst blendet Treffer in Ordnern aus,
-  die der anfragende Benutzer nicht auflisten darf.
+- Eine Suche über 3,8 Millionen Einträge dauert 3 bis 31 ms, die Liste folgt
+  also jedem Tastendruck.
+- Neue, umbenannte und gelöschte Dateien erscheinen nach etwa einer Sekunde.
+- Suchfenster, Kommandozeile `zt`, eine DLL für C, C++ und C#, ein Python-Paket,
+  eine optionale HTTP-API und das URL-Protokoll `zthing:` fragen alle denselben
+  Windows-Dienst und seinen einen Index.
+- Der Dienst blendet Treffer in Ordnern aus, die der anfragende Benutzer nicht
+  auflisten darf.
 
 ## Installation
 
